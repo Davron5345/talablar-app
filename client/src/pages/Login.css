@@ -1,0 +1,544 @@
+@import url('https://fonts.googleapis.com/css2?family=Onest:wght@300;400;500;600;700;800&display=swap');
+
+/* ===== Split-screen Layout ===== */
+.login-split-page {
+  display: flex;
+  width: 100vw;
+  min-height: 100vh;
+  background: #f8fafc;
+  overflow: hidden;
+  font-family: 'Onest', 'Segoe UI', system-ui, -apple-system, sans-serif;
+}
+
+/* ===== Full-Screen Video Wall Background ===== */
+.login-visual-panel {
+  position: fixed; /* Fixed background ensures it covers the viewport even when scrolling on mobile */
+  inset: 0;
+  background: #f8fafc;
+  overflow: hidden;
+  display: flex;
+  z-index: 1; /* behind form */
+  animation: fadeScaleIn 1.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.video-wall-mask {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  gap: 16px;
+  padding: 24px;
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 24%, #000 76%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 24%, #000 76%, transparent 100%);
+}
+
+.video-wall-scroll {
+  display: flex;
+  gap: 16px;
+  width: 140%;
+  height: 140%;
+  transform: rotate(-12deg) scale(1.2);
+  transform-origin: center center;
+  position: absolute;
+  left: -20%;
+  top: -20%;
+  justify-content: center;
+}
+
+.video-column {
+  width: 16vw;
+  min-width: 150px;
+  max-width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  height: 100%;
+}
+
+.video-track {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  will-change: transform;
+}
+
+/* Animations for scrolling up with slight offset */
+.col-1 .video-track {
+  animation: scrollColumnUp1 32s linear infinite;
+}
+
+.col-2 .video-track {
+  animation: scrollColumnUp4 36s linear infinite;
+}
+
+.col-3 .video-track {
+  animation: scrollColumnUp3 48s linear infinite;
+}
+
+.col-4 .video-track {
+  animation: scrollColumnUp5 44s linear infinite;
+}
+
+.col-5 .video-track {
+  animation: scrollColumnUp2 40s linear infinite;
+}
+
+@keyframes scrollColumnUp1 {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(-1992px); } /* Height of 12 items (150px each) + 12 gaps (16px each) */
+}
+
+@keyframes scrollColumnUp2 {
+  0% { transform: translateY(-150px); }
+  100% { transform: translateY(-2142px); }
+}
+
+@keyframes scrollColumnUp3 {
+  0% { transform: translateY(-300px); }
+  100% { transform: translateY(-2292px); }
+}
+
+@keyframes scrollColumnUp4 {
+  0% { transform: translateY(-75px); }
+  100% { transform: translateY(-2067px); }
+}
+
+@keyframes scrollColumnUp5 {
+  0% { transform: translateY(-225px); }
+  100% { transform: translateY(-2217px); }
+}
+
+.video-card-wrapper {
+  width: 100%;
+  height: 150px;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+  border: 1px solid rgba(0, 0, 0, 0.05);
+  background: rgba(255, 255, 255, 0.4);
+  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.4s ease;
+}
+
+.video-card-wrapper:hover {
+  transform: scale(1.04);
+  border-color: rgba(99, 102, 241, 0.4);
+}
+
+.video-card-element {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Floating Brand Glassmorphic Panel (Light Theme) */
+.visual-brand-overlay {
+  position: absolute;
+  left: 60px;
+  bottom: 60px;
+  width: 380px; /* Floating width on full-screen layout */
+  background: rgba(255, 255, 255, 0.65);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 24px;
+  padding: 24px 32px;
+  color: #0f172a;
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.05);
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  animation: slideUpFade 1.2s cubic-bezier(0.16, 1, 0.3, 1) 0.2s forwards;
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+.brand-logo-container {
+  display: flex;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.brand-logo-img {
+  height: 32px;
+  width: auto;
+  filter: invert(1) brightness(0.2); /* Colors white logo path to dark slate */
+}
+
+.brand-subtitle {
+  font-size: 0.95rem;
+  color: #475569;
+  margin: 0;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+/* ===== Floating Form Panel on Right ===== */
+.login-form-panel {
+  position: relative;
+  z-index: 5; /* on top of video background */
+  margin-left: auto; /* push to right side of viewport */
+  width: 50%; /* right 50% */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px 24px 20px;
+  background: transparent; /* transparent panel shows video wall underneath */
+  min-height: 100vh;
+  animation: slideInRight 1.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.login-form-wrapper {
+  width: 100%;
+  max-width: 420px;
+  margin: auto 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.card-brand-header {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.card-brand-logo {
+  height: 32px;
+  width: auto;
+  filter: invert(1) brightness(0.2); /* Colors white logo path to dark slate */
+}
+
+/* ===== Premium Glassmorphism Form Card ===== */
+.login-card {
+  border: 1px solid rgba(255, 255, 255, 0.4) !important;
+  border-radius: 24px !important;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.06) !important;
+  background: rgba(255, 255, 255, 0.7) !important;
+  backdrop-filter: blur(24px) !important;
+  -webkit-backdrop-filter: blur(24px) !important;
+}
+
+.login-card h2 {
+  font-family: 'Onest', sans-serif;
+  font-weight: 700;
+  color: #1e293b;
+  font-size: 1.5rem;
+  letter-spacing: -0.01em;
+}
+
+.login-card .text-muted {
+  color: #94a3b8 !important;
+  font-size: 0.9rem;
+}
+
+.login-card .form-label {
+  font-weight: 600;
+  color: #475569;
+  font-size: 0.88rem;
+  margin-bottom: 0.4rem;
+}
+
+.login-card .form-control {
+  height: 48px;
+  border-radius: 12px;
+  border: 1px solid rgba(99, 102, 241, 0.16);
+  background: rgba(255, 255, 255, 0.7);
+  font-size: 0.95rem;
+  padding: 0 16px;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+}
+
+/* Premium Autofill styling to match light theme */
+.login-card .form-control:-webkit-autofill,
+.login-card .form-control:-webkit-autofill:hover,
+.login-card .form-control:-webkit-autofill:focus {
+  -webkit-text-fill-color: #1e293b;
+  -webkit-box-shadow: 0 0 0px 1000px #f0f2ff inset;
+  transition: background-color 5000s ease-in-out 0s;
+}
+
+.login-card .form-control:focus {
+  border-color: #5850ec;
+  box-shadow: 0 0 0 4px rgba(88, 80, 236, 0.12);
+}
+
+/* Eye toggle inside the password field */
+.login-password-field {
+  position: relative;
+}
+
+.login-password-input {
+  padding-right: 48px !important;
+}
+
+.login-password-eye {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  cursor: pointer;
+  z-index: 3;
+  transition: background-color 0.16s ease, color 0.16s ease;
+}
+
+.login-password-eye:hover {
+  background: #f1f5f9;
+  color: #5850ec;
+}
+
+/* Button & Links Styling */
+.login-submit-btn {
+  height: 48px;
+  border: none !important;
+  border-radius: 14px !important;
+  font-weight: 600 !important;
+  color: #ffffff !important;
+  background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%) !important;
+  box-shadow: 0 8px 20px rgba(79, 70, 229, 0.22) !important;
+  transition: transform 0.16s ease, box-shadow 0.16s ease;
+}
+
+.login-submit-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 26px rgba(79, 70, 229, 0.28) !important;
+}
+
+.login-submit-btn:disabled {
+  opacity: 0.7;
+}
+
+.login-context-chip {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgba(88, 80, 236, 0.08);
+  color: #4f46e5;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.login-inline-link {
+  background: none;
+  border: none;
+  color: #4f46e5;
+  font-weight: 600;
+  font-size: 0.85rem;
+  padding: 0;
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+
+.login-inline-link:hover {
+  color: #3b82f6;
+  text-decoration: none;
+}
+
+.login-inline-link:disabled {
+  opacity: 0.6;
+}
+
+.login-forgot-panel {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 16px;
+}
+
+/* Footer in Right Panel */
+.login-page-footer {
+  width: 100%;
+  max-width: 500px;
+  margin-top: auto;
+  padding-top: 24px;
+  font-size: 0.82rem;
+  color: #94a3b8;
+  z-index: 5;
+}
+
+.footer-links {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+}
+
+.footer-link {
+  color: #64748b;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 0.15s ease;
+}
+
+.footer-link:hover {
+  color: #4f46e5;
+}
+
+/* ===== Entrance Animations ===== */
+@keyframes fadeScaleIn {
+  0% {
+    opacity: 0;
+    transform: scale(1.02);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes slideInRight {
+  0% {
+    opacity: 0;
+    transform: translateX(30px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slideUpFade {
+  0% {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ===== Responsive Adaptability ===== */
+@media (max-width: 991.98px) {
+  .visual-brand-overlay {
+    display: none;
+  }
+  
+  .login-split-page {
+    background: #f8fafc;
+    overflow-y: auto;
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .login-form-panel {
+    width: 100%;
+    margin-left: 0;
+    padding: 24px 16px 32px 16px;
+    background: transparent;
+    animation: fadeScaleIn 1s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .login-form-wrapper {
+    margin: auto 0;
+  }
+
+
+
+  /* Optimized video columns for mobile */
+  .col-1, .col-5 {
+    display: none; /* Hide edge columns to reduce performance overhead and center layout */
+  }
+  
+  .video-column {
+    width: 28vw;
+    min-width: 100px;
+    max-width: 130px;
+  }
+  
+  .video-wall-scroll {
+    width: 120%;
+    height: 120%;
+    left: -10%;
+    top: -10%;
+    gap: 12px;
+  }
+  
+  .video-wall-mask {
+    gap: 12px;
+    padding: 12px;
+    /* Soften the mask on mobile so the videos are visible above and below the card */
+    mask-image: linear-gradient(to bottom, transparent 0%, #000 12%, #000 88%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 12%, #000 88%, transparent 100%);
+  }
+  
+  .video-card-wrapper {
+    height: 110px; /* smaller video cards on mobile */
+    border-radius: 10px;
+  }
+
+  /* Apply mobile-specific scrolling translations based on new card height (110px) + gap (12px) = 122px.
+     For 12 items, 122 * 12 = 1464px.
+  */
+  .col-2 .video-track {
+    animation: scrollColumnUpMobile4 36s linear infinite;
+  }
+
+  .col-3 .video-track {
+    animation: scrollColumnUpMobile3 48s linear infinite;
+  }
+
+  .col-4 .video-track {
+    animation: scrollColumnUpMobile5 44s linear infinite;
+  }
+
+  /* Premium glassmorphic card on mobile with higher opacity for better contrast */
+  .login-card {
+    background: rgba(255, 255, 255, 0.88) !important; /* Whiter background for contrast */
+    backdrop-filter: blur(28px) !important;
+    -webkit-backdrop-filter: blur(28px) !important;
+    border: 1px solid rgba(255, 255, 255, 0.65) !important;
+    box-shadow: 0 20px 45px rgba(0, 0, 0, 0.08) !important;
+  }
+
+  /* Make form controls solid white so they pop out clearly against the frosted card */
+  .login-card .form-control {
+    background: #ffffff !important;
+    border: 1px solid rgba(99, 102, 241, 0.22) !important;
+  }
+
+  .login-page-footer {
+    margin-top: 32px;
+    padding-top: 16px;
+  }
+
+  .footer-links {
+    gap: 8px 16px;
+  }
+
+  .footer-link {
+    font-size: 0.78rem;
+  }
+}
+
+/* ===== Mobile Scrolling Animations ===== */
+@keyframes scrollColumnUpMobile3 {
+  0% { transform: translateY(-220px); } /* starts offset by 2 items (110px * 2) */
+  100% { transform: translateY(-1684px); } /* translates by 12 items (-1464px) */
+}
+
+@keyframes scrollColumnUpMobile4 {
+  0% { transform: translateY(-55px); } /* starts offset by half an item (110px * 0.5) */
+  100% { transform: translateY(-1519px); } /* translates by 12 items (-1464px) */
+}
+
+@keyframes scrollColumnUpMobile5 {
+  0% { transform: translateY(-165px); } /* starts offset by 1.5 items (110px * 1.5) */
+  100% { transform: translateY(-1629px); } /* translates by 12 items (-1464px) */
+}

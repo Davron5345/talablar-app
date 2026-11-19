@@ -1,0 +1,5860 @@
+:root {
+  --app-font-family: 'Onest', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+  --primary-color: #475569;
+  --primary-dark: #334155;
+  --primary-light: #64748b;
+  --accent-color: #93c5fd;
+  --accent-soft: #f3f4f6;
+  --background-color: #f3f4f6;
+  --app-shell-background:
+    radial-gradient(circle at 12% 8%, rgba(59, 130, 246, 0.12), transparent 42%),
+    radial-gradient(circle at 88% 14%, rgba(71, 85, 105, 0.10), transparent 38%),
+    linear-gradient(180deg, #f8fafc 0%, var(--background-color) 52%, #e5e7eb 100%);
+  --surface-color: #ffffff;
+  --text-color: #111827;
+  --text-secondary: #6b7280;
+  --border-color: #d1d5db;
+  --shadow: 0 14px 36px rgba(15, 23, 42, 0.08);
+  --shadow-hover: 0 18px 42px rgba(15, 23, 42, 0.14);
+  --radius-lg: 16px;
+  --radius-md: 12px;
+  --radius-sm: 8px;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --bs-primary: #475569;
+  --bs-secondary: #93c5fd;
+}
+
+:root[data-ui-theme="modern"] {
+  --primary-color: #0f766e;
+  --primary-dark: #0b5f58;
+  --primary-light: #14b8a6;
+  --accent-color: #f59e0b;
+  --accent-soft: #fef3c7;
+  --background-color: #eef8f7;
+  --app-shell-background:
+    radial-gradient(circle at 14% 9%, rgba(20, 184, 166, 0.18), transparent 42%),
+    radial-gradient(circle at 86% 12%, rgba(245, 158, 11, 0.14), transparent 38%),
+    linear-gradient(180deg, #f3fbfa 0%, var(--background-color) 52%, #e5f1ef 100%);
+  --surface-color: #ffffff;
+  --text-color: #0f172a;
+  --text-secondary: #4b5563;
+  --border-color: #b7d7d3;
+  --shadow: 0 14px 32px rgba(13, 76, 70, 0.12);
+  --shadow-hover: 0 18px 40px rgba(13, 76, 70, 0.18);
+  --bs-primary: #0f766e;
+  --bs-secondary: #f59e0b;
+}
+
+:root[data-ui-theme="talablar_blue"] {
+  --primary-color: #4f46e5;
+  --primary-dark: #4338ca;
+  --primary-light: #6366f1;
+  --accent-color: #60a5fa;
+  --accent-soft: #e0e7ff;
+  --background-color: #f5f7ff;
+  --app-shell-background:
+    radial-gradient(circle at 16% 10%, rgba(99, 102, 241, 0.24), transparent 44%),
+    radial-gradient(circle at 86% 12%, rgba(96, 165, 250, 0.2), transparent 38%),
+    linear-gradient(180deg, #ffffff 0%, var(--background-color) 52%, #edf1ff 100%);
+  --surface-color: #ffffff;
+  --text-color: #111827;
+  --text-secondary: #4b5563;
+  --border-color: #c7d2fe;
+  --shadow: 0 14px 34px rgba(79, 70, 229, 0.14);
+  --shadow-hover: 0 18px 42px rgba(79, 70, 229, 0.2);
+  --bs-primary: #4f46e5;
+  --bs-secondary: #60a5fa;
+}
+
+:root[data-ui-theme="mint_fresh"] {
+  --primary-color: #0f766e;
+  --primary-dark: #115e59;
+  --primary-light: #10b981;
+  --accent-color: #22d3ee;
+  --accent-soft: #dcfce7;
+  --background-color: #f2fbf8;
+  --app-shell-background:
+    radial-gradient(circle at 14% 8%, rgba(16, 185, 129, 0.2), transparent 42%),
+    radial-gradient(circle at 82% 12%, rgba(34, 211, 238, 0.16), transparent 36%),
+    linear-gradient(180deg, #ffffff 0%, var(--background-color) 54%, #e6f7f1 100%);
+  --surface-color: #ffffff;
+  --text-color: #102a2b;
+  --text-secondary: #4b5563;
+  --border-color: #bde4db;
+  --shadow: 0 14px 32px rgba(15, 118, 110, 0.12);
+  --shadow-hover: 0 18px 40px rgba(15, 118, 110, 0.18);
+  --bs-primary: #0f766e;
+  --bs-secondary: #22d3ee;
+}
+
+:root[data-ui-theme="sunset_pop"] {
+  --primary-color: #ea580c;
+  --primary-dark: #c2410c;
+  --primary-light: #f97316;
+  --accent-color: #f43f5e;
+  --accent-soft: #ffedd5;
+  --background-color: #fff7f2;
+  --app-shell-background:
+    radial-gradient(circle at 12% 9%, rgba(249, 115, 22, 0.22), transparent 44%),
+    radial-gradient(circle at 88% 13%, rgba(244, 63, 94, 0.18), transparent 38%),
+    linear-gradient(180deg, #ffffff 0%, var(--background-color) 52%, #fff1e6 100%);
+  --surface-color: #ffffff;
+  --text-color: #2b1608;
+  --text-secondary: #6b7280;
+  --border-color: #fed7aa;
+  --shadow: 0 14px 32px rgba(234, 88, 12, 0.14);
+  --shadow-hover: 0 18px 40px rgba(234, 88, 12, 0.2);
+  --bs-primary: #ea580c;
+  --bs-secondary: #f43f5e;
+}
+
+:root[data-ui-theme="berry_blast"] {
+  --primary-color: #be185d;
+  --primary-dark: #9d174d;
+  --primary-light: #db2777;
+  --accent-color: #f97316;
+  --accent-soft: #fdf2f8;
+  --background-color: #fff5fa;
+  --app-shell-background:
+    radial-gradient(circle at 18% 8%, rgba(219, 39, 119, 0.2), transparent 44%),
+    radial-gradient(circle at 84% 12%, rgba(249, 115, 22, 0.16), transparent 36%),
+    linear-gradient(180deg, #ffffff 0%, var(--background-color) 54%, #ffeaf5 100%);
+  --surface-color: #ffffff;
+  --text-color: #2a1020;
+  --text-secondary: #6b7280;
+  --border-color: #fbcfe8;
+  --shadow: 0 14px 34px rgba(190, 24, 93, 0.14);
+  --shadow-hover: 0 18px 42px rgba(190, 24, 93, 0.2);
+  --bs-primary: #be185d;
+  --bs-secondary: #f97316;
+}
+
+:root[data-ui-theme="violet_wave"] {
+  --primary-color: #6d28d9;
+  --primary-dark: #5b21b6;
+  --primary-light: #8b5cf6;
+  --accent-color: #22d3ee;
+  --accent-soft: #ede9fe;
+  --background-color: #f6f5ff;
+  --app-shell-background:
+    radial-gradient(circle at 14% 10%, rgba(139, 92, 246, 0.24), transparent 44%),
+    radial-gradient(circle at 86% 14%, rgba(34, 211, 238, 0.16), transparent 38%),
+    linear-gradient(180deg, #ffffff 0%, var(--background-color) 52%, #efeefe 100%);
+  --surface-color: #ffffff;
+  --text-color: #1f1637;
+  --text-secondary: #6b7280;
+  --border-color: #ddd6fe;
+  --shadow: 0 14px 34px rgba(109, 40, 217, 0.15);
+  --shadow-hover: 0 18px 42px rgba(109, 40, 217, 0.22);
+  --bs-primary: #6d28d9;
+  --bs-secondary: #22d3ee;
+}
+
+:root[data-ui-theme="rainbow"] {
+  --primary-color: #2563eb;
+  --primary-dark: #1d4ed8;
+  --primary-light: #3b82f6;
+  --accent-color: #f97316;
+  --accent-soft: #f3f4f6;
+  --background-color: #f8fafc;
+  --app-shell-background:
+    radial-gradient(circle at 8% 10%, rgba(239, 68, 68, 0.16), transparent 40%),
+    radial-gradient(circle at 24% 2%, rgba(249, 115, 22, 0.14), transparent 32%),
+    radial-gradient(circle at 46% 5%, rgba(234, 179, 8, 0.14), transparent 34%),
+    radial-gradient(circle at 66% 7%, rgba(16, 185, 129, 0.14), transparent 34%),
+    radial-gradient(circle at 84% 9%, rgba(59, 130, 246, 0.16), transparent 36%),
+    radial-gradient(circle at 94% 12%, rgba(139, 92, 246, 0.16), transparent 32%),
+    linear-gradient(180deg, #ffffff 0%, var(--background-color) 52%, #eef2ff 100%);
+  --surface-color: #ffffff;
+  --text-color: #111827;
+  --text-secondary: #6b7280;
+  --border-color: #d1d5db;
+  --shadow: 0 14px 34px rgba(37, 99, 235, 0.12);
+  --shadow-hover: 0 18px 42px rgba(37, 99, 235, 0.18);
+  --bs-primary: #2563eb;
+  --bs-secondary: #f97316;
+}
+
+/* Light Gray — мягкий светло-серый фон, белые карточки, нейтральный акцент.
+   Стоковый основной цвет можно переопределить вручную (ui_primary_color). */
+:root[data-ui-theme="light_gray"] {
+  --primary-color: #64748b;
+  --primary-dark: #475569;
+  --primary-light: #94a3b8;
+  --accent-color: #94a3b8;
+  --accent-soft: #eef1f4;
+  --background-color: #eef0f3;
+  --app-shell-background:
+    radial-gradient(circle at 16% 8%, rgba(100, 116, 139, 0.08), transparent 44%),
+    radial-gradient(circle at 84% 16%, rgba(148, 163, 184, 0.08), transparent 40%),
+    linear-gradient(180deg, #f7f8fa 0%, var(--background-color) 55%, #e4e7ec 100%);
+  --surface-color: #ffffff;
+  --text-color: #1f2937;
+  --text-secondary: #6b7280;
+  --border-color: #e2e6ea;
+  --shadow: 0 14px 34px rgba(15, 23, 42, 0.07);
+  --shadow-hover: 0 18px 42px rgba(15, 23, 42, 0.12);
+  --bs-primary: #64748b;
+  --bs-primary-rgb: 100, 116, 139;
+  --bs-secondary: #94a3b8;
+}
+
+/* Verdant Glass — тёмно-зелёный фон + матовое стекло на карточках, белый текст.
+   Применяется к публичной витрине (.client-surface) и WebApp-корзине (.client-content). */
+:root[data-ui-theme="verdant_glass"] {
+  --primary-color: #0d9488;
+  --primary-dark: #0f766e;
+  --primary-light: #2dd4bf;
+  --accent-color: #facc15;
+  --accent-soft: rgba(13, 148, 136, 0.22);
+  --background-color: #0d2e1c;
+  --app-shell-background:
+    radial-gradient(circle at 18% 8%, rgba(45, 212, 191, 0.18), transparent 48%),
+    radial-gradient(circle at 82% 22%, rgba(74, 222, 128, 0.14), transparent 48%),
+    radial-gradient(circle at 60% 90%, rgba(20, 184, 166, 0.16), transparent 52%),
+    linear-gradient(180deg, #0d2e1c 0%, #0f3220 48%, #082417 100%);
+  --surface-color: rgba(255, 255, 255, 0.06);
+  --text-color: #f0fdf4;
+  --text-secondary: rgba(240, 253, 244, 0.72);
+  --border-color: rgba(255, 255, 255, 0.14);
+  --shadow: 0 14px 32px rgba(0, 0, 0, 0.45);
+  --shadow-hover: 0 22px 44px rgba(0, 0, 0, 0.55);
+  --bs-primary: #0d9488;
+  --bs-primary-rgb: 13, 148, 136;
+  --bs-secondary: #facc15;
+}
+
+/* Карточки на клиентских поверхностях — матовое стекло. */
+:root[data-ui-theme="verdant_glass"] .client-surface .card,
+:root[data-ui-theme="verdant_glass"] .client-content .card {
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #f0fdf4;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+:root[data-ui-theme="verdant_glass"] .client-surface .card .card-title,
+:root[data-ui-theme="verdant_glass"] .client-content .card .card-title,
+:root[data-ui-theme="verdant_glass"] .client-surface .card h1,
+:root[data-ui-theme="verdant_glass"] .client-surface .card h2,
+:root[data-ui-theme="verdant_glass"] .client-surface .card h3,
+:root[data-ui-theme="verdant_glass"] .client-surface .card h4,
+:root[data-ui-theme="verdant_glass"] .client-surface .card h5,
+:root[data-ui-theme="verdant_glass"] .client-content .card h1,
+:root[data-ui-theme="verdant_glass"] .client-content .card h2,
+:root[data-ui-theme="verdant_glass"] .client-content .card h3,
+:root[data-ui-theme="verdant_glass"] .client-content .card h4,
+:root[data-ui-theme="verdant_glass"] .client-content .card h5 {
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface .category-card-outside-title,
+:root[data-ui-theme="verdant_glass"] .client-content .category-card-outside-title {
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface .card .text-muted,
+:root[data-ui-theme="verdant_glass"] .client-content .card .text-muted,
+:root[data-ui-theme="verdant_glass"] .client-surface .text-muted,
+:root[data-ui-theme="verdant_glass"] .client-content .text-muted {
+  color: rgba(240, 253, 244, 0.7) !important;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface .bg-light,
+:root[data-ui-theme="verdant_glass"] .client-content .bg-light {
+  background-color: rgba(255, 255, 255, 0.06) !important;
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface .border-top,
+:root[data-ui-theme="verdant_glass"] .client-content .border-top {
+  border-top-color: rgba(255, 255, 255, 0.14) !important;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface .btn-outline-secondary,
+:root[data-ui-theme="verdant_glass"] .client-content .btn-outline-secondary {
+  color: #f0fdf4;
+  border-color: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.04);
+}
+:root[data-ui-theme="verdant_glass"] .client-surface .btn-outline-secondary:hover,
+:root[data-ui-theme="verdant_glass"] .client-content .btn-outline-secondary:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+:root[data-ui-theme="verdant_glass"] .client-surface .form-control,
+:root[data-ui-theme="verdant_glass"] .client-content .form-control {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface .form-control::placeholder,
+:root[data-ui-theme="verdant_glass"] .client-content .form-control::placeholder {
+  color: rgba(240, 253, 244, 0.55);
+}
+:root[data-ui-theme="verdant_glass"] .client-surface .form-control:focus,
+:root[data-ui-theme="verdant_glass"] .client-content .form-control:focus {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(94, 234, 212, 0.6);
+  box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.2);
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface .form-label,
+:root[data-ui-theme="verdant_glass"] .client-content .form-label,
+:root[data-ui-theme="verdant_glass"] .client-surface label,
+:root[data-ui-theme="verdant_glass"] .client-content label {
+  color: #f0fdf4;
+}
+
+/* Модалки витрины и WebApp рендерятся в портал (вне .client-surface/.client-content).
+   Перекрашиваем их отдельно, чтобы текст/поля/кнопки совпадали с темой. */
+:root[data-ui-theme="verdant_glass"] .modal-content {
+  background: linear-gradient(180deg, #0f3220 0%, #082417 100%);
+  color: #f0fdf4;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  --bs-body-color: #f0fdf4;
+  --bs-body-color-rgb: 240, 253, 244;
+}
+:root[data-ui-theme="verdant_glass"] .modal-content .modal-header,
+:root[data-ui-theme="verdant_glass"] .modal-content .modal-footer {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+:root[data-ui-theme="verdant_glass"] .modal-content .modal-title,
+:root[data-ui-theme="verdant_glass"] .modal-content h1,
+:root[data-ui-theme="verdant_glass"] .modal-content h2,
+:root[data-ui-theme="verdant_glass"] .modal-content h3,
+:root[data-ui-theme="verdant_glass"] .modal-content h4,
+:root[data-ui-theme="verdant_glass"] .modal-content h5,
+:root[data-ui-theme="verdant_glass"] .modal-content h6,
+:root[data-ui-theme="verdant_glass"] .modal-content p {
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .modal-content .btn-close {
+  filter: invert(1) grayscale(100%) brightness(2);
+  opacity: 0.8;
+}
+:root[data-ui-theme="verdant_glass"] .modal-content .form-label,
+:root[data-ui-theme="verdant_glass"] .modal-content label {
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .modal-content .form-control {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .modal-content .form-control::placeholder {
+  color: rgba(240, 253, 244, 0.55);
+}
+:root[data-ui-theme="verdant_glass"] .modal-content .form-control:focus {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(94, 234, 212, 0.6);
+  box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.2);
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .modal-content .text-muted {
+  color: rgba(240, 253, 244, 0.7) !important;
+}
+:root[data-ui-theme="verdant_glass"] .modal-content .border-top {
+  border-top-color: rgba(255, 255, 255, 0.14) !important;
+}
+:root[data-ui-theme="verdant_glass"] .modal-content .bg-light {
+  background-color: rgba(255, 255, 255, 0.06) !important;
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .modal-content .btn-outline-secondary {
+  color: #f0fdf4;
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.04);
+}
+:root[data-ui-theme="verdant_glass"] .modal-content .btn-outline-secondary:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.45);
+}
+/* Inline-стили модалок ставят светлые панели (#f8fafc и т.п.) — переводим в стекло. */
+:root[data-ui-theme="verdant_glass"] .modal-content [style*="background: #f8fafc"],
+:root[data-ui-theme="verdant_glass"] .modal-content [style*="background: rgb(248, 250, 252)"],
+:root[data-ui-theme="verdant_glass"] .modal-content [style*="background: #f8fafb"],
+:root[data-ui-theme="verdant_glass"] .modal-content [style*="background: rgba(248, 250, 252"],
+:root[data-ui-theme="verdant_glass"] .modal-content [style*="background: rgba(241, 245, 249"] {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #f0fdf4;
+}
+/* «Назад»-кнопка модалок витрины с inline-белым фоном — тоже в стекло. */
+:root[data-ui-theme="verdant_glass"] .modal-content [style*="background: rgba(255, 255, 255, 0.82)"] {
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #f0fdf4 !important;
+}
+/* Catalog.jsx и баннеры ставят inline color: #111827/4b5563/334155, фон rgba(255,255,255,...).
+   Переводим их в светлый текст и матовое стекло, чтобы шапки и баннеры читались. */
+:root[data-ui-theme="verdant_glass"] .client-surface [style*="color: rgb(17, 24, 39)"],
+:root[data-ui-theme="verdant_glass"] .client-surface [style*="color: rgb(75, 85, 99)"],
+:root[data-ui-theme="verdant_glass"] .client-surface [style*="color: rgb(51, 65, 85)"],
+:root[data-ui-theme="verdant_glass"] .client-surface [style*="color: rgb(100, 116, 139)"],
+:root[data-ui-theme="verdant_glass"] .client-surface [style*="color: #111827"],
+:root[data-ui-theme="verdant_glass"] .client-surface [style*="color: #4b5563"],
+:root[data-ui-theme="verdant_glass"] .client-surface [style*="color: #334155"],
+:root[data-ui-theme="verdant_glass"] .client-surface [style*="color: #64748b"] {
+  color: #f0fdf4 !important;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface button[style*="background: rgba(255, 255, 255, 0.85)"],
+:root[data-ui-theme="verdant_glass"] .client-surface button[style*="background: rgba(71, 85, 105, 0.1)"],
+:root[data-ui-theme="verdant_glass"] .client-surface [style*="background: rgba(71, 85, 105, 0.13)"] {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+/* Cart.jsx определяет .cart-surface-* / .cart-segmented-* в собственном <style>
+   с background:#f8fafc !important; перебиваем темой более специфичным селектором. */
+:root[data-ui-theme="verdant_glass"] .client-content .cart-surface-field,
+:root[data-ui-theme="verdant_glass"] .client-content .cart-surface-panel,
+:root[data-ui-theme="verdant_glass"] .client-content .cart-segmented-switch {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid rgba(255, 255, 255, 0.18) !important;
+  color: #f0fdf4 !important;
+}
+:root[data-ui-theme="verdant_glass"] .client-content .cart-surface-field:focus {
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-color: rgba(94, 234, 212, 0.6) !important;
+  box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.2) !important;
+}
+:root[data-ui-theme="verdant_glass"] .client-content .cart-segmented-option {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid rgba(255, 255, 255, 0.18) !important;
+  color: #f0fdf4 !important;
+}
+:root[data-ui-theme="verdant_glass"] .client-content .cart-segmented-option.is-active {
+  background: rgba(45, 212, 191, 0.18) !important;
+  border-color: rgba(94, 234, 212, 0.45) !important;
+  color: #5eead4 !important;
+}
+:root[data-ui-theme="verdant_glass"] .client-content .cart-segmented-option:hover,
+:root[data-ui-theme="verdant_glass"] .client-content .cart-segmented-option:focus {
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-color: rgba(255, 255, 255, 0.32) !important;
+}
+
+/* Поисковая строка в шапке каталога — белый фон inline → стекло, текст светлый. */
+:root[data-ui-theme="verdant_glass"] .client-surface div[style*="background: rgba(255,255,255,0.95)"],
+:root[data-ui-theme="verdant_glass"] .client-surface div[style*="background: rgba(255, 255, 255, 0.95)"],
+:root[data-ui-theme="verdant_glass"] .client-surface div[style*="background: rgb(255, 255, 255)"][style*="border-radius: 12"] {
+  background: rgba(255, 255, 255, 0.07) !important;
+  border-color: rgba(255, 255, 255, 0.2) !important;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface input[type="search"] {
+  color: #f0fdf4 !important;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface input[type="search"]::placeholder {
+  color: rgba(240, 253, 244, 0.55) !important;
+}
+
+/* Иконки шапки витрины (аккаунт, поиск) — белый stroke у lucide-SVG.
+   color="#4b5563" в JSX становится stroke-атрибутом; CSS-присваивание
+   stroke с !important переопределяет presentation-атрибут SVG. */
+:root[data-ui-theme="verdant_glass"] .client-surface button[aria-label="Аккаунт"] svg,
+:root[data-ui-theme="verdant_glass"] .client-surface button[aria-label="Поиск"] svg,
+:root[data-ui-theme="verdant_glass"] .client-surface button[aria-label="Akkaunt"] svg,
+:root[data-ui-theme="verdant_glass"] .client-surface button[aria-label="Qidiruv"] svg,
+:root[data-ui-theme="verdant_glass"] .client-surface .client-topbar-side svg {
+  stroke: #f0fdf4 !important;
+  color: #f0fdf4 !important;
+}
+/* Лупа в поиске тоже */
+:root[data-ui-theme="verdant_glass"] .client-surface span[style*="color: #475569"] svg {
+  stroke: rgba(240, 253, 244, 0.85) !important;
+  color: rgba(240, 253, 244, 0.85) !important;
+}
+
+/* Счётчик количества в корзине — pill белый, цифра тёмная, чтобы число читалось. */
+:root[data-ui-theme="verdant_glass"] .client-content .bg-light.rounded-pill {
+  background-color: rgba(255, 255, 255, 0.92) !important;
+  color: #0f172a !important;
+}
+:root[data-ui-theme="verdant_glass"] .client-content .bg-light.rounded-pill * {
+  color: #0f172a !important;
+}
+
+/* WebApp шапка — стилизуем кнопку «Назад» и переключатель языка под тему. */
+:root[data-ui-theme="verdant_glass"] .client-topbar-back-btn,
+:root[data-ui-theme="verdant_glass"] .client-language-toggle {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border: 1px solid rgba(255, 255, 255, 0.2) !important;
+  color: #f0fdf4 !important;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+:root[data-ui-theme="verdant_glass"] .client-topbar-back-btn:hover,
+:root[data-ui-theme="verdant_glass"] .client-language-toggle:hover {
+  background: rgba(255, 255, 255, 0.16) !important;
+  border-color: rgba(255, 255, 255, 0.32) !important;
+}
+
+/* Кнопка «Назад» в шапке каталога (inline-стиль rgba(255,255,255,0.82) + dark text). */
+:root[data-ui-theme="verdant_glass"] .client-surface button[style*="background: rgba(255,255,255,0.82)"],
+:root[data-ui-theme="verdant_glass"] .client-surface button[style*="background: rgba(255, 255, 255, 0.82)"] {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(255, 255, 255, 0.2) !important;
+  color: #f0fdf4 !important;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface button[style*="background: rgba(255,255,255,0.82)"] span,
+:root[data-ui-theme="verdant_glass"] .client-surface button[style*="background: rgba(255, 255, 255, 0.82)"] span {
+  color: #f0fdf4 !important;
+}
+/* Кнопки аккаунта/поиска с inline-фоном rgba(255,255,255,0.7) когда модалка открыта. */
+:root[data-ui-theme="verdant_glass"] .client-surface button[style*="background: rgba(255,255,255,0.7)"],
+:root[data-ui-theme="verdant_glass"] .client-surface button[style*="background: rgba(255, 255, 255, 0.7)"] {
+  background: rgba(255, 255, 255, 0.12) !important;
+  border-color: rgba(255, 255, 255, 0.22) !important;
+}
+
+/* Модалка деталей товара (.product-details-modal-fullscreen) — внутри
+   .product-details-block (#ffffff) и .product-details-review-item (#f8fafc)
+   рендерятся как светлые карточки. Переводим в стекло, светлый текст. */
+:root[data-ui-theme="verdant_glass"] .product-details-block {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border-color: rgba(255, 255, 255, 0.16) !important;
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .product-details-block .text-muted,
+:root[data-ui-theme="verdant_glass"] .product-details-block .small {
+  color: rgba(240, 253, 244, 0.7) !important;
+}
+:root[data-ui-theme="verdant_glass"] .product-details-review-item {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  color: #f0fdf4;
+}
+/* Нижний qty-степпер на модалке деталей — белый pill с тёмной цифрой,
+   чтобы число «8 / 3» нормально читалось (как в WebApp). */
+:root[data-ui-theme="verdant_glass"] .product-details-bottom-stepper {
+  background: rgba(255, 255, 255, 0.92) !important;
+  border-color: rgba(255, 255, 255, 0.6) !important;
+}
+:root[data-ui-theme="verdant_glass"] .product-details-bottom-stepper span,
+:root[data-ui-theme="verdant_glass"] .product-details-bottom-stepper button {
+  color: #0f172a !important;
+}
+
+/* Кнопка «В корзину» в карточке: задаём бирюзу темы напрямую (как у остальных
+   .modal-content .btn-primary), не полагаясь на var(--primary-color). */
+:root[data-ui-theme="verdant_glass"] .product-details-bottom-cta,
+:root[data-ui-theme="verdant_glass"] .product-details-bottom-cta.btn,
+:root[data-ui-theme="verdant_glass"] .product-details-bottom-cta.btn-primary {
+  --bs-btn-bg: var(--primary-color);
+  --bs-btn-border-color: var(--primary-color);
+  --bs-btn-hover-bg: var(--primary-dark);
+  --bs-btn-hover-border-color: var(--primary-dark);
+  --bs-btn-active-bg: var(--primary-dark);
+  --bs-btn-active-border-color: var(--primary-dark);
+  --bs-btn-disabled-bg: var(--primary-color);
+  --bs-btn-disabled-border-color: var(--primary-color);
+  background: var(--primary-color) !important;
+  border-color: var(--primary-color) !important;
+  color: #fff !important;
+}
+:root[data-ui-theme="verdant_glass"] .product-details-bottom-cta.btn:hover,
+:root[data-ui-theme="verdant_glass"] .product-details-bottom-cta.btn:focus,
+:root[data-ui-theme="verdant_glass"] .product-details-bottom-cta.btn:active {
+  background: var(--primary-dark) !important;
+  border-color: var(--primary-dark) !important;
+  color: #fff !important;
+}
+
+/* Pill-счётчик qty в storefront cart-modal (.bg-light.rounded-pill внутри портала). */
+:root[data-ui-theme="verdant_glass"] .modal-content .bg-light.rounded-pill {
+  background-color: rgba(255, 255, 255, 0.92) !important;
+  color: #0f172a !important;
+}
+:root[data-ui-theme="verdant_glass"] .modal-content .bg-light.rounded-pill * {
+  color: #0f172a !important;
+}
+
+/* Cart-step 1 inline-степпер: outer div { background: #f1f5f9; borderRadius: 999 } —
+   делаем pill белым, цифру и кнопки тёмными, чтобы число читалось. */
+:root[data-ui-theme="verdant_glass"] .modal-content div[style*="background: rgb(241, 245, 249)"],
+:root[data-ui-theme="verdant_glass"] .modal-content div[style*="background: #f1f5f9"] {
+  background: rgba(255, 255, 255, 0.92) !important;
+}
+:root[data-ui-theme="verdant_glass"] .modal-content div[style*="background: rgb(241, 245, 249)"] *,
+:root[data-ui-theme="verdant_glass"] .modal-content div[style*="background: #f1f5f9"] * {
+  color: #0f172a !important;
+}
+
+/* product-details-modal на десктопе и мобиле имеет хардкод #ffffff/#f3f4f6/#f8fafc
+   для modal-content, body, scroll, hero. Перекрываем темой. */
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen .modal-content,
+:root[data-ui-theme="verdant_glass"] .product-details-modal-body,
+:root[data-ui-theme="verdant_glass"] .product-details-scroll {
+  background: linear-gradient(180deg, #0f3220 0%, #082417 100%) !important;
+  color: #f0fdf4 !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+}
+:root[data-ui-theme="verdant_glass"] .product-details-hero,
+:root[data-ui-theme="verdant_glass"] .product-details-hero-image-btn,
+:root[data-ui-theme="verdant_glass"] .product-details-hero-image {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+/* Текст внутри карточки деталей — заголовок, цена-stricken, размеры. */
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen h1,
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen h2,
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen h3,
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen h4,
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen h5,
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen h6,
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen p,
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen .product-details-block,
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen .product-details-block * {
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen .text-muted,
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen .small {
+  color: rgba(240, 253, 244, 0.7) !important;
+}
+/* Кнопки вариантов (S/M/L/красный/...): inline-styled, переводим в стекло, текст светлый. */
+:root[data-ui-theme="verdant_glass"] .product-details-variants-scroll button {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border: 1px solid rgba(255, 255, 255, 0.2) !important;
+  color: #f0fdf4 !important;
+}
+:root[data-ui-theme="verdant_glass"] .product-details-variants-scroll button[style*="rgba(22,163,74,0.14)"] {
+  background: rgba(45, 212, 191, 0.18) !important;
+  border: 2px solid #5eead4 !important;
+  color: #5eead4 !important;
+}
+
+/* Лист с описанием/ценой (.product-details-sheet) хардкодит светлый #f3f4f6.
+   Делаем фон НЕПРОЗРАЧНЫМ тёмно-зелёным: светлый текст темы читается, и лист
+   перекрывает sticky-фото при прокрутке (прозрачный фон пропускал картинку). */
+:root[data-ui-theme="verdant_glass"] .product-details-sheet {
+  background: #0c2c1b !important;
+  box-shadow: none !important;
+}
+/* Нижняя плашка с CTA (webapp/мобайл) — светлый градиент #f3f4f6 → тёмно-зелёный. */
+:root[data-ui-theme="verdant_glass"] .product-details-bottom-bar {
+  background: linear-gradient(180deg, rgba(8, 36, 23, 0), rgba(8, 36, 23, 0.95) 26%, #082417 62%) !important;
+}
+/* Метрика недели — стеклянная плашка вместо светло-синей, текст светлый. */
+:root[data-ui-theme="verdant_glass"] .product-details-weekly-metric {
+  background: rgba(45, 212, 191, 0.12) !important;
+  border-color: rgba(94, 234, 212, 0.32) !important;
+  color: #d7fbf0 !important;
+}
+/* Скроллбар модалки на тёмно-зелёном фоне — берём яркую бирюзу для контраста. */
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen .modal-content,
+:root[data-ui-theme="verdant_glass"] .product-details-modal-body,
+:root[data-ui-theme="verdant_glass"] .product-details-scroll {
+  scrollbar-color: rgba(45, 212, 191, 0.7) transparent;
+}
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen .modal-content::-webkit-scrollbar-thumb,
+:root[data-ui-theme="verdant_glass"] .product-details-modal-body::-webkit-scrollbar-thumb,
+:root[data-ui-theme="verdant_glass"] .product-details-scroll::-webkit-scrollbar-thumb {
+  background: rgba(45, 212, 191, 0.7);
+  background-clip: padding-box;
+}
+:root[data-ui-theme="verdant_glass"] .product-details-modal-fullscreen .modal-content::-webkit-scrollbar-thumb:hover,
+:root[data-ui-theme="verdant_glass"] .product-details-modal-body::-webkit-scrollbar-thumb:hover,
+:root[data-ui-theme="verdant_glass"] .product-details-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(94, 234, 212, 0.9);
+  background-clip: padding-box;
+}
+
+/* Иконка корзины в шапке витрины — белый stroke, как у аккаунта/поиска. */
+:root[data-ui-theme="verdant_glass"] .client-surface button[aria-label="Корзина"] svg,
+:root[data-ui-theme="verdant_glass"] .client-surface button[aria-label="Savat"] svg {
+  stroke: #f0fdf4 !important;
+  color: #f0fdf4 !important;
+}
+
+/* Кнопка «Применить» (промокод) и любая .btn-primary на клиентских поверхностях.
+   Bootstrap btn-* читает --bs-btn-* переменные, --bs-primary его не меняет. */
+:root[data-ui-theme="verdant_glass"] .client-surface .btn-primary,
+:root[data-ui-theme="verdant_glass"] .client-content .btn-primary,
+:root[data-ui-theme="verdant_glass"] .modal-content .btn-primary {
+  --bs-btn-bg: var(--primary-color);
+  --bs-btn-border-color: var(--primary-color);
+  --bs-btn-color: #ffffff;
+  --bs-btn-hover-bg: var(--primary-dark);
+  --bs-btn-hover-border-color: var(--primary-dark);
+  --bs-btn-hover-color: #ffffff;
+  --bs-btn-active-bg: var(--primary-dark);
+  --bs-btn-active-border-color: var(--primary-dark);
+  --bs-btn-active-color: #ffffff;
+  --bs-btn-disabled-bg: var(--primary-color);
+  --bs-btn-disabled-border-color: var(--primary-color);
+  --bs-btn-disabled-color: rgba(255, 255, 255, 0.75);
+  background: var(--primary-color) !important;
+  border-color: var(--primary-color) !important;
+  color: #ffffff !important;
+}
+
+/* Топбар каталога — полупрозрачное зелёное стекло поверх фона. */
+:root[data-ui-theme="verdant_glass"] .client-surface .navbar {
+  background: rgba(13, 46, 28, 0.7) !important;
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+:root[data-ui-theme="verdant_glass"] .client-topbar {
+  background: rgba(13, 46, 28, 0.7);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .client-bottom-nav {
+  background: rgba(13, 46, 28, 0.85);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #f0fdf4;
+  box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.35);
+}
+
+/* Светлый текст на тёмно-зелёном фоне для всех клиентских заголовков и абзацев.
+   Локально переопределяем Bootstrap body-color, чтобы любой текст вне явно
+   окрашенных элементов был светлым, не задевая админку. */
+:root[data-ui-theme="verdant_glass"] .client-surface,
+:root[data-ui-theme="verdant_glass"] .client-content {
+  --bs-body-color: #f0fdf4;
+  --bs-body-color-rgb: 240, 253, 244;
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface h1,
+:root[data-ui-theme="verdant_glass"] .client-surface h2,
+:root[data-ui-theme="verdant_glass"] .client-surface h3,
+:root[data-ui-theme="verdant_glass"] .client-surface h4,
+:root[data-ui-theme="verdant_glass"] .client-surface h5,
+:root[data-ui-theme="verdant_glass"] .client-surface h6,
+:root[data-ui-theme="verdant_glass"] .client-surface p,
+:root[data-ui-theme="verdant_glass"] .client-content h1,
+:root[data-ui-theme="verdant_glass"] .client-content h2,
+:root[data-ui-theme="verdant_glass"] .client-content h3,
+:root[data-ui-theme="verdant_glass"] .client-content h4,
+:root[data-ui-theme="verdant_glass"] .client-content h5,
+:root[data-ui-theme="verdant_glass"] .client-content h6,
+:root[data-ui-theme="verdant_glass"] .client-content p {
+  color: #f0fdf4;
+}
+/* Кнопки/обёртки категорий и шапка с логотипом ставят inline background: white/rgba(255,...).
+   Перебиваем их матовым стеклом, текст внутри становится светлым. */
+:root[data-ui-theme="verdant_glass"] .client-surface button[style*="background: #ffffff"],
+:root[data-ui-theme="verdant_glass"] .client-surface button[style*="background: rgb(255, 255, 255)"],
+:root[data-ui-theme="verdant_glass"] .client-surface button[style*="background: white"],
+:root[data-ui-theme="verdant_glass"] .client-surface div[style*="background: #ffffff"],
+:root[data-ui-theme="verdant_glass"] .client-surface div[style*="background: rgb(255, 255, 255)"],
+:root[data-ui-theme="verdant_glass"] .client-surface div[style*="background: white"] {
+  background: rgba(255, 255, 255, 0.07) !important;
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface [style*="background: rgba(255, 255, 255, 0.74)"],
+:root[data-ui-theme="verdant_glass"] .client-surface [style*="background: rgba(255, 255, 255, 0.42)"],
+:root[data-ui-theme="verdant_glass"] .client-surface [style*="background: rgba(255,255,255,0.82)"] {
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #f0fdf4 !important;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface .navbar-brand,
+:root[data-ui-theme="verdant_glass"] .client-surface .navbar-brand * {
+  color: #f0fdf4;
+}
+/* Карточки категорий (на витрине) и любые текстовые надписи внутри них —
+   принудительно стеклянные, чтобы перебить inline-белый из Catalog.jsx. */
+:root[data-ui-theme="verdant_glass"] .client-surface .client-category-card {
+  background: rgba(255, 255, 255, 0.06) !important;
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  color: #f0fdf4;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface .client-category-card * {
+  color: #f0fdf4 !important;
+}
+
+/* Превью в админке (вкладка «Оформление и стиль») — копируем стеклянный стиль так,
+   чтобы оператор видел итог, а не светлую сетку. */
+[data-preview-theme="verdant_glass"] .admin-appearance-live-preview-viewport {
+  background: linear-gradient(180deg, #0d2e1c 0%, #082417 100%);
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-preview-header {
+  background: rgba(13, 46, 28, 0.82);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-preview-topbar {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-preview-brand,
+[data-preview-theme="verdant_glass"] .admin-appearance-live-preview-top-icons {
+  color: #f0fdf4;
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-preview-logo-wrap {
+  background: rgba(255, 255, 255, 0.06);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-section-title {
+  color: #f0fdf4;
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-category-card,
+[data-preview-theme="verdant_glass"] .admin-appearance-live-product-card {
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-category-card span,
+[data-preview-theme="verdant_glass"] .admin-appearance-live-product-name {
+  color: #f0fdf4;
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-product-unit {
+  color: rgba(240, 253, 244, 0.65);
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-product-image-wrap {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.04));
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-product-heart {
+  background: rgba(13, 46, 28, 0.7);
+  color: #f0fdf4;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-preview-nav {
+  background: rgba(13, 46, 28, 0.78);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-preview-nav-item {
+  color: rgba(240, 253, 244, 0.7);
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-preview-nav-item.is-active {
+  background: rgba(45, 212, 191, 0.18);
+  color: #5eead4;
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-detail-title,
+[data-preview-theme="verdant_glass"] .admin-appearance-live-detail-price,
+[data-preview-theme="verdant_glass"] .admin-appearance-live-detail-meta {
+  color: #f0fdf4;
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-detail-meta {
+  color: rgba(240, 253, 244, 0.65);
+}
+[data-preview-theme="verdant_glass"] .admin-appearance-live-detail-back {
+  color: #f0fdf4;
+}
+
+/* Golden Crust — тёплый «люкс» в тёмном эспрессо-тоне: матовое стекло, кремовый
+   текст, янтарные акценты. Зеркалит структуру Verdant Glass (см. выше). */
+:root[data-ui-theme="golden_crust"] {
+  --primary-color: #d98a2b;
+  --primary-dark: #b06f1f;
+  --primary-light: #f0b65c;
+  --accent-color: #fbbf24;
+  --accent-soft: rgba(217, 138, 43, 0.22);
+  --background-color: #0f0c08;
+  --app-shell-background:
+    radial-gradient(circle at 18% 8%, rgba(217, 138, 43, 0.1), transparent 48%),
+    radial-gradient(circle at 82% 22%, rgba(240, 182, 92, 0.08), transparent 48%),
+    radial-gradient(circle at 60% 90%, rgba(176, 111, 31, 0.1), transparent 52%),
+    linear-gradient(180deg, #0f0c08 0%, #15110b 48%, #0a0805 100%);
+  --surface-color: rgba(255, 255, 255, 0.06);
+  --text-color: #f7efe3;
+  --text-secondary: rgba(247, 239, 227, 0.72);
+  --border-color: rgba(255, 255, 255, 0.14);
+  --shadow: 0 14px 32px rgba(0, 0, 0, 0.45);
+  --shadow-hover: 0 22px 44px rgba(0, 0, 0, 0.55);
+  --bs-primary: #d98a2b;
+  --bs-primary-rgb: 217, 138, 43;
+  --bs-secondary: #fbbf24;
+}
+
+/* Карточки на клиентских поверхностях — матовое стекло. */
+:root[data-ui-theme="golden_crust"] .client-surface .card,
+:root[data-ui-theme="golden_crust"] .client-content .card {
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #f7efe3;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+:root[data-ui-theme="golden_crust"] .client-surface .card .card-title,
+:root[data-ui-theme="golden_crust"] .client-content .card .card-title,
+:root[data-ui-theme="golden_crust"] .client-surface .card h1,
+:root[data-ui-theme="golden_crust"] .client-surface .card h2,
+:root[data-ui-theme="golden_crust"] .client-surface .card h3,
+:root[data-ui-theme="golden_crust"] .client-surface .card h4,
+:root[data-ui-theme="golden_crust"] .client-surface .card h5,
+:root[data-ui-theme="golden_crust"] .client-content .card h1,
+:root[data-ui-theme="golden_crust"] .client-content .card h2,
+:root[data-ui-theme="golden_crust"] .client-content .card h3,
+:root[data-ui-theme="golden_crust"] .client-content .card h4,
+:root[data-ui-theme="golden_crust"] .client-content .card h5 {
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .client-surface .category-card-outside-title,
+:root[data-ui-theme="golden_crust"] .client-content .category-card-outside-title {
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .client-surface .card .text-muted,
+:root[data-ui-theme="golden_crust"] .client-content .card .text-muted,
+:root[data-ui-theme="golden_crust"] .client-surface .text-muted,
+:root[data-ui-theme="golden_crust"] .client-content .text-muted {
+  color: rgba(247, 239, 227, 0.7) !important;
+}
+:root[data-ui-theme="golden_crust"] .client-surface .bg-light,
+:root[data-ui-theme="golden_crust"] .client-content .bg-light {
+  background-color: rgba(255, 255, 255, 0.06) !important;
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .client-surface .border-top,
+:root[data-ui-theme="golden_crust"] .client-content .border-top {
+  border-top-color: rgba(255, 255, 255, 0.14) !important;
+}
+:root[data-ui-theme="golden_crust"] .client-surface .btn-outline-secondary,
+:root[data-ui-theme="golden_crust"] .client-content .btn-outline-secondary {
+  color: #f7efe3;
+  border-color: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.04);
+}
+:root[data-ui-theme="golden_crust"] .client-surface .btn-outline-secondary:hover,
+:root[data-ui-theme="golden_crust"] .client-content .btn-outline-secondary:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+:root[data-ui-theme="golden_crust"] .client-surface .form-control,
+:root[data-ui-theme="golden_crust"] .client-content .form-control {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .client-surface .form-control::placeholder,
+:root[data-ui-theme="golden_crust"] .client-content .form-control::placeholder {
+  color: rgba(247, 239, 227, 0.55);
+}
+:root[data-ui-theme="golden_crust"] .client-surface .form-control:focus,
+:root[data-ui-theme="golden_crust"] .client-content .form-control:focus {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(245, 196, 81, 0.6);
+  box-shadow: 0 0 0 3px rgba(217, 138, 43, 0.2);
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .client-surface .form-label,
+:root[data-ui-theme="golden_crust"] .client-content .form-label,
+:root[data-ui-theme="golden_crust"] .client-surface label,
+:root[data-ui-theme="golden_crust"] .client-content label {
+  color: #f7efe3;
+}
+
+/* Модалки витрины и WebApp рендерятся в портал (вне .client-surface/.client-content).
+   Перекрашиваем их отдельно, чтобы текст/поля/кнопки совпадали с темой. */
+:root[data-ui-theme="golden_crust"] .modal-content {
+  background: linear-gradient(180deg, #15110b 0%, #0a0805 100%);
+  color: #f7efe3;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  --bs-body-color: #f7efe3;
+  --bs-body-color-rgb: 240, 253, 244;
+}
+:root[data-ui-theme="golden_crust"] .modal-content .modal-header,
+:root[data-ui-theme="golden_crust"] .modal-content .modal-footer {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+:root[data-ui-theme="golden_crust"] .modal-content .modal-title,
+:root[data-ui-theme="golden_crust"] .modal-content h1,
+:root[data-ui-theme="golden_crust"] .modal-content h2,
+:root[data-ui-theme="golden_crust"] .modal-content h3,
+:root[data-ui-theme="golden_crust"] .modal-content h4,
+:root[data-ui-theme="golden_crust"] .modal-content h5,
+:root[data-ui-theme="golden_crust"] .modal-content h6,
+:root[data-ui-theme="golden_crust"] .modal-content p {
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .modal-content .btn-close {
+  filter: invert(1) grayscale(100%) brightness(2);
+  opacity: 0.8;
+}
+:root[data-ui-theme="golden_crust"] .modal-content .form-label,
+:root[data-ui-theme="golden_crust"] .modal-content label {
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .modal-content .form-control {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .modal-content .form-control::placeholder {
+  color: rgba(247, 239, 227, 0.55);
+}
+:root[data-ui-theme="golden_crust"] .modal-content .form-control:focus {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(245, 196, 81, 0.6);
+  box-shadow: 0 0 0 3px rgba(217, 138, 43, 0.2);
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .modal-content .text-muted {
+  color: rgba(247, 239, 227, 0.7) !important;
+}
+:root[data-ui-theme="golden_crust"] .modal-content .border-top {
+  border-top-color: rgba(255, 255, 255, 0.14) !important;
+}
+:root[data-ui-theme="golden_crust"] .modal-content .bg-light {
+  background-color: rgba(255, 255, 255, 0.06) !important;
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .modal-content .btn-outline-secondary {
+  color: #f7efe3;
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.04);
+}
+:root[data-ui-theme="golden_crust"] .modal-content .btn-outline-secondary:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.45);
+}
+/* Inline-стили модалок ставят светлые панели (#f8fafc и т.п.) — переводим в стекло. */
+:root[data-ui-theme="golden_crust"] .modal-content [style*="background: #f8fafc"],
+:root[data-ui-theme="golden_crust"] .modal-content [style*="background: rgb(248, 250, 252)"],
+:root[data-ui-theme="golden_crust"] .modal-content [style*="background: #f8fafb"],
+:root[data-ui-theme="golden_crust"] .modal-content [style*="background: rgba(248, 250, 252"],
+:root[data-ui-theme="golden_crust"] .modal-content [style*="background: rgba(241, 245, 249"] {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #f7efe3;
+}
+/* «Назад»-кнопка модалок витрины с inline-белым фоном — тоже в стекло. */
+:root[data-ui-theme="golden_crust"] .modal-content [style*="background: rgba(255, 255, 255, 0.82)"] {
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #f7efe3 !important;
+}
+/* Catalog.jsx и баннеры ставят inline color: #111827/4b5563/334155, фон rgba(255,255,255,...).
+   Переводим их в светлый текст и матовое стекло, чтобы шапки и баннеры читались. */
+:root[data-ui-theme="golden_crust"] .client-surface [style*="color: rgb(17, 24, 39)"],
+:root[data-ui-theme="golden_crust"] .client-surface [style*="color: rgb(75, 85, 99)"],
+:root[data-ui-theme="golden_crust"] .client-surface [style*="color: rgb(51, 65, 85)"],
+:root[data-ui-theme="golden_crust"] .client-surface [style*="color: rgb(100, 116, 139)"],
+:root[data-ui-theme="golden_crust"] .client-surface [style*="color: #111827"],
+:root[data-ui-theme="golden_crust"] .client-surface [style*="color: #4b5563"],
+:root[data-ui-theme="golden_crust"] .client-surface [style*="color: #334155"],
+:root[data-ui-theme="golden_crust"] .client-surface [style*="color: #64748b"] {
+  color: #f7efe3 !important;
+}
+:root[data-ui-theme="golden_crust"] .client-surface button[style*="background: rgba(255, 255, 255, 0.85)"],
+:root[data-ui-theme="golden_crust"] .client-surface button[style*="background: rgba(71, 85, 105, 0.1)"],
+:root[data-ui-theme="golden_crust"] .client-surface [style*="background: rgba(71, 85, 105, 0.13)"] {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+/* Cart.jsx определяет .cart-surface-* / .cart-segmented-* в собственном <style>
+   с background:#f8fafc !important; перебиваем темой более специфичным селектором. */
+:root[data-ui-theme="golden_crust"] .client-content .cart-surface-field,
+:root[data-ui-theme="golden_crust"] .client-content .cart-surface-panel,
+:root[data-ui-theme="golden_crust"] .client-content .cart-segmented-switch {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border: 1px solid rgba(255, 255, 255, 0.18) !important;
+  color: #f7efe3 !important;
+}
+:root[data-ui-theme="golden_crust"] .client-content .cart-surface-field:focus {
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-color: rgba(245, 196, 81, 0.6) !important;
+  box-shadow: 0 0 0 3px rgba(217, 138, 43, 0.2) !important;
+}
+:root[data-ui-theme="golden_crust"] .client-content .cart-segmented-option {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid rgba(255, 255, 255, 0.18) !important;
+  color: #f7efe3 !important;
+}
+:root[data-ui-theme="golden_crust"] .client-content .cart-segmented-option.is-active {
+  background: rgba(217, 138, 43, 0.1) !important;
+  border-color: rgba(245, 196, 81, 0.45) !important;
+  color: #f5c451 !important;
+}
+:root[data-ui-theme="golden_crust"] .client-content .cart-segmented-option:hover,
+:root[data-ui-theme="golden_crust"] .client-content .cart-segmented-option:focus {
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-color: rgba(255, 255, 255, 0.32) !important;
+}
+
+/* Поисковая строка в шапке каталога — белый фон inline → стекло, текст светлый. */
+:root[data-ui-theme="golden_crust"] .client-surface div[style*="background: rgba(255,255,255,0.95)"],
+:root[data-ui-theme="golden_crust"] .client-surface div[style*="background: rgba(255, 255, 255, 0.95)"],
+:root[data-ui-theme="golden_crust"] .client-surface div[style*="background: rgb(255, 255, 255)"][style*="border-radius: 12"] {
+  background: rgba(255, 255, 255, 0.07) !important;
+  border-color: rgba(255, 255, 255, 0.2) !important;
+}
+:root[data-ui-theme="golden_crust"] .client-surface input[type="search"] {
+  color: #f7efe3 !important;
+}
+:root[data-ui-theme="golden_crust"] .client-surface input[type="search"]::placeholder {
+  color: rgba(247, 239, 227, 0.55) !important;
+}
+
+/* Иконки шапки витрины (аккаунт, поиск) — белый stroke у lucide-SVG.
+   color="#4b5563" в JSX становится stroke-атрибутом; CSS-присваивание
+   stroke с !important переопределяет presentation-атрибут SVG. */
+:root[data-ui-theme="golden_crust"] .client-surface button[aria-label="Аккаунт"] svg,
+:root[data-ui-theme="golden_crust"] .client-surface button[aria-label="Поиск"] svg,
+:root[data-ui-theme="golden_crust"] .client-surface button[aria-label="Akkaunt"] svg,
+:root[data-ui-theme="golden_crust"] .client-surface button[aria-label="Qidiruv"] svg,
+:root[data-ui-theme="golden_crust"] .client-surface .client-topbar-side svg {
+  stroke: #f7efe3 !important;
+  color: #f7efe3 !important;
+}
+/* Лупа в поиске тоже */
+:root[data-ui-theme="golden_crust"] .client-surface span[style*="color: #475569"] svg {
+  stroke: rgba(247, 239, 227, 0.85) !important;
+  color: rgba(247, 239, 227, 0.85) !important;
+}
+
+/* Счётчик количества в корзине — pill белый, цифра тёмная, чтобы число читалось. */
+:root[data-ui-theme="golden_crust"] .client-content .bg-light.rounded-pill {
+  background-color: rgba(255, 255, 255, 0.92) !important;
+  color: #0f172a !important;
+}
+:root[data-ui-theme="golden_crust"] .client-content .bg-light.rounded-pill * {
+  color: #0f172a !important;
+}
+
+/* WebApp шапка — стилизуем кнопку «Назад» и переключатель языка под тему. */
+:root[data-ui-theme="golden_crust"] .client-topbar-back-btn,
+:root[data-ui-theme="golden_crust"] .client-language-toggle {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border: 1px solid rgba(255, 255, 255, 0.2) !important;
+  color: #f7efe3 !important;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+:root[data-ui-theme="golden_crust"] .client-topbar-back-btn:hover,
+:root[data-ui-theme="golden_crust"] .client-language-toggle:hover {
+  background: rgba(255, 255, 255, 0.16) !important;
+  border-color: rgba(255, 255, 255, 0.32) !important;
+}
+
+/* Кнопка «Назад» в шапке каталога (inline-стиль rgba(255,255,255,0.82) + dark text). */
+:root[data-ui-theme="golden_crust"] .client-surface button[style*="background: rgba(255,255,255,0.82)"],
+:root[data-ui-theme="golden_crust"] .client-surface button[style*="background: rgba(255, 255, 255, 0.82)"] {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(255, 255, 255, 0.2) !important;
+  color: #f7efe3 !important;
+}
+:root[data-ui-theme="golden_crust"] .client-surface button[style*="background: rgba(255,255,255,0.82)"] span,
+:root[data-ui-theme="golden_crust"] .client-surface button[style*="background: rgba(255, 255, 255, 0.82)"] span {
+  color: #f7efe3 !important;
+}
+/* Кнопки аккаунта/поиска с inline-фоном rgba(255,255,255,0.7) когда модалка открыта. */
+:root[data-ui-theme="golden_crust"] .client-surface button[style*="background: rgba(255,255,255,0.7)"],
+:root[data-ui-theme="golden_crust"] .client-surface button[style*="background: rgba(255, 255, 255, 0.7)"] {
+  background: rgba(255, 255, 255, 0.12) !important;
+  border-color: rgba(255, 255, 255, 0.22) !important;
+}
+
+/* Модалка деталей товара (.product-details-modal-fullscreen) — внутри
+   .product-details-block (#ffffff) и .product-details-review-item (#f8fafc)
+   рендерятся как светлые карточки. Переводим в стекло, светлый текст. */
+:root[data-ui-theme="golden_crust"] .product-details-block {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border-color: rgba(255, 255, 255, 0.16) !important;
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .product-details-block .text-muted,
+:root[data-ui-theme="golden_crust"] .product-details-block .small {
+  color: rgba(247, 239, 227, 0.7) !important;
+}
+:root[data-ui-theme="golden_crust"] .product-details-review-item {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  color: #f7efe3;
+}
+/* Нижний qty-степпер на модалке деталей — белый pill с тёмной цифрой,
+   чтобы число «8 / 3» нормально читалось (как в WebApp). */
+:root[data-ui-theme="golden_crust"] .product-details-bottom-stepper {
+  background: rgba(255, 255, 255, 0.92) !important;
+  border-color: rgba(255, 255, 255, 0.6) !important;
+}
+:root[data-ui-theme="golden_crust"] .product-details-bottom-stepper span,
+:root[data-ui-theme="golden_crust"] .product-details-bottom-stepper button {
+  color: #0f172a !important;
+}
+
+/* Кнопка «В корзину» в карточке: задаём бирюзу темы напрямую (как у остальных
+   .modal-content .btn-primary), не полагаясь на var(--primary-color). */
+:root[data-ui-theme="golden_crust"] .product-details-bottom-cta,
+:root[data-ui-theme="golden_crust"] .product-details-bottom-cta.btn,
+:root[data-ui-theme="golden_crust"] .product-details-bottom-cta.btn-primary {
+  --bs-btn-bg: var(--primary-color);
+  --bs-btn-border-color: var(--primary-color);
+  --bs-btn-hover-bg: var(--primary-dark);
+  --bs-btn-hover-border-color: var(--primary-dark);
+  --bs-btn-active-bg: var(--primary-dark);
+  --bs-btn-active-border-color: var(--primary-dark);
+  --bs-btn-disabled-bg: var(--primary-color);
+  --bs-btn-disabled-border-color: var(--primary-color);
+  background: var(--primary-color) !important;
+  border-color: var(--primary-color) !important;
+  color: #fff !important;
+}
+:root[data-ui-theme="golden_crust"] .product-details-bottom-cta.btn:hover,
+:root[data-ui-theme="golden_crust"] .product-details-bottom-cta.btn:focus,
+:root[data-ui-theme="golden_crust"] .product-details-bottom-cta.btn:active {
+  background: var(--primary-dark) !important;
+  border-color: var(--primary-dark) !important;
+  color: #fff !important;
+}
+
+/* Pill-счётчик qty в storefront cart-modal (.bg-light.rounded-pill внутри портала). */
+:root[data-ui-theme="golden_crust"] .modal-content .bg-light.rounded-pill {
+  background-color: rgba(255, 255, 255, 0.92) !important;
+  color: #0f172a !important;
+}
+:root[data-ui-theme="golden_crust"] .modal-content .bg-light.rounded-pill * {
+  color: #0f172a !important;
+}
+
+/* Cart-step 1 inline-степпер: outer div { background: #f1f5f9; borderRadius: 999 } —
+   делаем pill белым, цифру и кнопки тёмными, чтобы число читалось. */
+:root[data-ui-theme="golden_crust"] .modal-content div[style*="background: rgb(241, 245, 249)"],
+:root[data-ui-theme="golden_crust"] .modal-content div[style*="background: #f1f5f9"] {
+  background: rgba(255, 255, 255, 0.92) !important;
+}
+:root[data-ui-theme="golden_crust"] .modal-content div[style*="background: rgb(241, 245, 249)"] *,
+:root[data-ui-theme="golden_crust"] .modal-content div[style*="background: #f1f5f9"] * {
+  color: #0f172a !important;
+}
+
+/* product-details-modal на десктопе и мобиле имеет хардкод #ffffff/#f3f4f6/#f8fafc
+   для modal-content, body, scroll, hero. Перекрываем темой. */
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen .modal-content,
+:root[data-ui-theme="golden_crust"] .product-details-modal-body,
+:root[data-ui-theme="golden_crust"] .product-details-scroll {
+  background: linear-gradient(180deg, #15110b 0%, #0a0805 100%) !important;
+  color: #f7efe3 !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+}
+:root[data-ui-theme="golden_crust"] .product-details-hero,
+:root[data-ui-theme="golden_crust"] .product-details-hero-image-btn,
+:root[data-ui-theme="golden_crust"] .product-details-hero-image {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+/* Текст внутри карточки деталей — заголовок, цена-stricken, размеры. */
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen h1,
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen h2,
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen h3,
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen h4,
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen h5,
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen h6,
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen p,
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen .product-details-block,
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen .product-details-block * {
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen .text-muted,
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen .small {
+  color: rgba(247, 239, 227, 0.7) !important;
+}
+/* Кнопки вариантов (S/M/L/красный/...): inline-styled, переводим в стекло, текст светлый. */
+:root[data-ui-theme="golden_crust"] .product-details-variants-scroll button {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border: 1px solid rgba(255, 255, 255, 0.2) !important;
+  color: #f7efe3 !important;
+}
+:root[data-ui-theme="golden_crust"] .product-details-variants-scroll button[style*="rgba(22,163,74,0.14)"] {
+  background: rgba(217, 138, 43, 0.1) !important;
+  border: 2px solid #f5c451 !important;
+  color: #f5c451 !important;
+}
+
+/* Лист с описанием/ценой (.product-details-sheet) хардкодит светлый #f3f4f6.
+   Делаем фон НЕПРОЗРАЧНЫМ тёмно-зелёным: светлый текст темы читается, и лист
+   перекрывает sticky-фото при прокрутке (прозрачный фон пропускал картинку). */
+:root[data-ui-theme="golden_crust"] .product-details-sheet {
+  background: #14100b !important;
+  box-shadow: none !important;
+}
+/* Нижняя плашка с CTA (webapp/мобайл) — светлый градиент #f3f4f6 → тёмно-зелёный. */
+:root[data-ui-theme="golden_crust"] .product-details-bottom-bar {
+  background: linear-gradient(180deg, rgba(10, 8, 5, 0), rgba(10, 8, 5, 0.95) 26%, #0a0805 62%) !important;
+}
+/* Метрика недели — стеклянная плашка вместо светло-синей, текст светлый. */
+:root[data-ui-theme="golden_crust"] .product-details-weekly-metric {
+  background: rgba(217, 138, 43, 0.12) !important;
+  border-color: rgba(245, 196, 81, 0.32) !important;
+  color: #fbe6cf !important;
+}
+/* Скроллбар модалки на тёмно-зелёном фоне — берём яркую бирюзу для контраста. */
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen .modal-content,
+:root[data-ui-theme="golden_crust"] .product-details-modal-body,
+:root[data-ui-theme="golden_crust"] .product-details-scroll {
+  scrollbar-color: rgba(217, 138, 43, 0.7) transparent;
+}
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen .modal-content::-webkit-scrollbar-thumb,
+:root[data-ui-theme="golden_crust"] .product-details-modal-body::-webkit-scrollbar-thumb,
+:root[data-ui-theme="golden_crust"] .product-details-scroll::-webkit-scrollbar-thumb {
+  background: rgba(217, 138, 43, 0.7);
+  background-clip: padding-box;
+}
+:root[data-ui-theme="golden_crust"] .product-details-modal-fullscreen .modal-content::-webkit-scrollbar-thumb:hover,
+:root[data-ui-theme="golden_crust"] .product-details-modal-body::-webkit-scrollbar-thumb:hover,
+:root[data-ui-theme="golden_crust"] .product-details-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(245, 196, 81, 0.9);
+  background-clip: padding-box;
+}
+
+/* Иконка корзины в шапке витрины — белый stroke, как у аккаунта/поиска. */
+:root[data-ui-theme="golden_crust"] .client-surface button[aria-label="Корзина"] svg,
+:root[data-ui-theme="golden_crust"] .client-surface button[aria-label="Savat"] svg {
+  stroke: #f7efe3 !important;
+  color: #f7efe3 !important;
+}
+
+/* Кнопка «Применить» (промокод) и любая .btn-primary на клиентских поверхностях.
+   Bootstrap btn-* читает --bs-btn-* переменные, --bs-primary его не меняет. */
+:root[data-ui-theme="golden_crust"] .client-surface .btn-primary,
+:root[data-ui-theme="golden_crust"] .client-content .btn-primary,
+:root[data-ui-theme="golden_crust"] .modal-content .btn-primary {
+  --bs-btn-bg: var(--primary-color);
+  --bs-btn-border-color: var(--primary-color);
+  --bs-btn-color: #ffffff;
+  --bs-btn-hover-bg: var(--primary-dark);
+  --bs-btn-hover-border-color: var(--primary-dark);
+  --bs-btn-hover-color: #ffffff;
+  --bs-btn-active-bg: var(--primary-dark);
+  --bs-btn-active-border-color: var(--primary-dark);
+  --bs-btn-active-color: #ffffff;
+  --bs-btn-disabled-bg: var(--primary-color);
+  --bs-btn-disabled-border-color: var(--primary-color);
+  --bs-btn-disabled-color: rgba(255, 255, 255, 0.75);
+  background: var(--primary-color) !important;
+  border-color: var(--primary-color) !important;
+  color: #ffffff !important;
+}
+
+/* Топбар каталога — полупрозрачное зелёное стекло поверх фона. */
+:root[data-ui-theme="golden_crust"] .client-surface .navbar {
+  background: rgba(15, 12, 8, 0.7) !important;
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+:root[data-ui-theme="golden_crust"] .client-topbar {
+  background: rgba(15, 12, 8, 0.7);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .client-bottom-nav {
+  background: rgba(15, 12, 8, 0.85);
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #f7efe3;
+  box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.35);
+}
+
+/* Светлый текст на тёмно-зелёном фоне для всех клиентских заголовков и абзацев.
+   Локально переопределяем Bootstrap body-color, чтобы любой текст вне явно
+   окрашенных элементов был светлым, не задевая админку. */
+:root[data-ui-theme="golden_crust"] .client-surface,
+:root[data-ui-theme="golden_crust"] .client-content {
+  --bs-body-color: #f7efe3;
+  --bs-body-color-rgb: 240, 253, 244;
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .client-surface h1,
+:root[data-ui-theme="golden_crust"] .client-surface h2,
+:root[data-ui-theme="golden_crust"] .client-surface h3,
+:root[data-ui-theme="golden_crust"] .client-surface h4,
+:root[data-ui-theme="golden_crust"] .client-surface h5,
+:root[data-ui-theme="golden_crust"] .client-surface h6,
+:root[data-ui-theme="golden_crust"] .client-surface p,
+:root[data-ui-theme="golden_crust"] .client-content h1,
+:root[data-ui-theme="golden_crust"] .client-content h2,
+:root[data-ui-theme="golden_crust"] .client-content h3,
+:root[data-ui-theme="golden_crust"] .client-content h4,
+:root[data-ui-theme="golden_crust"] .client-content h5,
+:root[data-ui-theme="golden_crust"] .client-content h6,
+:root[data-ui-theme="golden_crust"] .client-content p {
+  color: #f7efe3;
+}
+/* Кнопки/обёртки категорий и шапка с логотипом ставят inline background: white/rgba(255,...).
+   Перебиваем их матовым стеклом, текст внутри становится светлым. */
+:root[data-ui-theme="golden_crust"] .client-surface button[style*="background: #ffffff"],
+:root[data-ui-theme="golden_crust"] .client-surface button[style*="background: rgb(255, 255, 255)"],
+:root[data-ui-theme="golden_crust"] .client-surface button[style*="background: white"],
+:root[data-ui-theme="golden_crust"] .client-surface div[style*="background: #ffffff"],
+:root[data-ui-theme="golden_crust"] .client-surface div[style*="background: rgb(255, 255, 255)"],
+:root[data-ui-theme="golden_crust"] .client-surface div[style*="background: white"] {
+  background: rgba(255, 255, 255, 0.07) !important;
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .client-surface [style*="background: rgba(255, 255, 255, 0.74)"],
+:root[data-ui-theme="golden_crust"] .client-surface [style*="background: rgba(255, 255, 255, 0.42)"],
+:root[data-ui-theme="golden_crust"] .client-surface [style*="background: rgba(255,255,255,0.82)"] {
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: #f7efe3 !important;
+}
+:root[data-ui-theme="golden_crust"] .client-surface .navbar-brand,
+:root[data-ui-theme="golden_crust"] .client-surface .navbar-brand * {
+  color: #f7efe3;
+}
+/* Карточки категорий (на витрине) и любые текстовые надписи внутри них —
+   принудительно стеклянные, чтобы перебить inline-белый из Catalog.jsx. */
+:root[data-ui-theme="golden_crust"] .client-surface .client-category-card {
+  background: rgba(255, 255, 255, 0.06) !important;
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  color: #f7efe3;
+}
+:root[data-ui-theme="golden_crust"] .client-surface .client-category-card * {
+  color: #f7efe3 !important;
+}
+
+/* Превью в админке (вкладка «Оформление и стиль») — копируем стеклянный стиль так,
+   чтобы оператор видел итог, а не светлую сетку. */
+[data-preview-theme="golden_crust"] .admin-appearance-live-preview-viewport {
+  background: linear-gradient(180deg, #0f0c08 0%, #0a0805 100%);
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-preview-header {
+  background: rgba(15, 12, 8, 0.82);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-preview-topbar {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-preview-brand,
+[data-preview-theme="golden_crust"] .admin-appearance-live-preview-top-icons {
+  color: #f7efe3;
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-preview-logo-wrap {
+  background: rgba(255, 255, 255, 0.06);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-section-title {
+  color: #f7efe3;
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-category-card,
+[data-preview-theme="golden_crust"] .admin-appearance-live-product-card {
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-category-card span,
+[data-preview-theme="golden_crust"] .admin-appearance-live-product-name {
+  color: #f7efe3;
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-product-unit {
+  color: rgba(247, 239, 227, 0.65);
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-product-image-wrap {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.04));
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-product-heart {
+  background: rgba(15, 12, 8, 0.7);
+  color: #f7efe3;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-preview-nav {
+  background: rgba(15, 12, 8, 0.78);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-preview-nav-item {
+  color: rgba(247, 239, 227, 0.7);
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-preview-nav-item.is-active {
+  background: rgba(217, 138, 43, 0.1);
+  color: #f5c451;
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-detail-title,
+[data-preview-theme="golden_crust"] .admin-appearance-live-detail-price,
+[data-preview-theme="golden_crust"] .admin-appearance-live-detail-meta {
+  color: #f7efe3;
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-detail-meta {
+  color: rgba(247, 239, 227, 0.65);
+}
+[data-preview-theme="golden_crust"] .admin-appearance-live-detail-back {
+  color: #f7efe3;
+}
+
+:root[data-ui-font="sans"] {
+  --app-font-family: 'Onest', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+:root[data-ui-font="inter"] {
+  --app-font-family: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+:root[data-ui-font="roboto"] {
+  --app-font-family: 'Roboto', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+:root[data-ui-font="open_sans"] {
+  --app-font-family: 'Open Sans', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+:root[data-ui-font="lato"] {
+  --app-font-family: 'Lato', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+:root[data-ui-font="montserrat"] {
+  --app-font-family: 'Montserrat', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+:root[data-ui-font="poppins"] {
+  --app-font-family: 'Poppins', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+:root[data-ui-font="nunito"] {
+  --app-font-family: 'Nunito', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+:root[data-ui-font="serif_times"] {
+  --app-font-family: 'Times New Roman', Times, 'Nimbus Roman No9 L', serif;
+}
+
+:root[data-ui-font="serif_georgia"] {
+  --app-font-family: Georgia, 'Times New Roman', Times, serif;
+}
+
+:root[data-ui-font="serif_merriweather"] {
+  --app-font-family: 'Merriweather', Georgia, 'Times New Roman', serif;
+}
+
+:root[data-ui-font="serif_playfair"] {
+  --app-font-family: 'Playfair Display', Georgia, 'Times New Roman', serif;
+}
+
+:root[data-ui-font="serif_garamond"] {
+  --app-font-family: Garamond, 'Palatino Linotype', 'Book Antiqua', Palatino, serif;
+}
+
+:root[data-ui-font="serif_baskerville"] {
+  --app-font-family: Baskerville, 'Times New Roman', Georgia, serif;
+}
+
+/* Дисплейные «тюнинг»-шрифты (NFS-стиль) и узкие минималистичные. Грузятся из
+   Google Fonts в index.html. Латинские дисплейные без кириллицы — для кириллицы
+   возьмётся системный фолбэк. */
+:root[data-ui-font="racing_sans"] {
+  --app-font-family: 'Racing Sans One', 'Oswald', system-ui, sans-serif;
+}
+
+:root[data-ui-font="faster_one"] {
+  --app-font-family: 'Faster One', 'Racing Sans One', system-ui, sans-serif;
+}
+
+:root[data-ui-font="orbitron"] {
+  --app-font-family: 'Orbitron', 'Audiowide', system-ui, sans-serif;
+}
+
+:root[data-ui-font="audiowide"] {
+  --app-font-family: 'Audiowide', 'Orbitron', system-ui, sans-serif;
+}
+
+:root[data-ui-font="oswald"] {
+  --app-font-family: 'Oswald', 'Arial Narrow', system-ui, sans-serif;
+}
+
+:root[data-ui-font="bebas_neue"] {
+  --app-font-family: 'Bebas Neue', 'Oswald', 'Arial Narrow', sans-serif;
+}
+
+:root[data-ui-font="archivo_narrow"] {
+  --app-font-family: 'Archivo Narrow', 'Arial Narrow', system-ui, sans-serif;
+}
+
+/* Степпер «− n +» на карточке товара: inline-фон rgba(255,255,255,0.95)
+   перебивался стеклянным правилом тёмных тем (как у строки поиска) и становился
+   прозрачным. Возвращаем сплошной светлый pill с тёмными цифрами. */
+:root[data-ui-theme="verdant_glass"] .client-surface div.catalog-card-qty-stepper,
+:root[data-ui-theme="golden_crust"] .client-surface div.catalog-card-qty-stepper {
+  background: rgba(255, 255, 255, 0.96) !important;
+  border: 1px solid rgba(255, 255, 255, 0.55) !important;
+}
+:root[data-ui-theme="verdant_glass"] .client-surface div.catalog-card-qty-stepper .btn,
+:root[data-ui-theme="verdant_glass"] .client-surface div.catalog-card-qty-stepper span,
+:root[data-ui-theme="golden_crust"] .client-surface div.catalog-card-qty-stepper .btn,
+:root[data-ui-theme="golden_crust"] .client-surface div.catalog-card-qty-stepper span {
+  color: #0f172a !important;
+}
+
+/* Миниатюры слотов рекламных баннеров в админке: выбор файла внутри слота,
+   оверлей «Заменить» и кнопка удаления — по наведению. */
+.store-banner-thumb-label {
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: #94a3b8;
+  margin-bottom: 3px;
+}
+.store-banner-pick-wrap {
+  position: relative;
+}
+.store-banner-pick {
+  position: relative;
+  display: block;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(71, 85, 105, 0.2);
+  background: #f1f5f9;
+  cursor: pointer;
+}
+.store-banner-pick img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.store-banner-empty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: #94a3b8;
+  font-size: 0.66rem;
+}
+.store-banner-empty i {
+  font-size: 1rem;
+}
+.store-banner-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: rgba(15, 23, 42, 0.5);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.store-banner-pick:hover .store-banner-overlay {
+  opacity: 1;
+}
+.store-banner-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 4;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(220, 38, 38, 0.95);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.66rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+}
+.store-banner-pick-wrap:hover .store-banner-remove {
+  opacity: 1;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* iOS Safari - disable swipe back gesture and elastic scroll */
+html,
+body {
+  overscroll-behavior-x: none;
+  overscroll-behavior-y: none;
+  overflow-x: hidden;
+  position: fixed;
+  width: 100%;
+  height: 100%;
+  /* pan-y breaks horizontal scrolling inside the catalog (Telegram WebView / iOS). manipulation keeps vertical scroll and allows nested pan-x regions. */
+  touch-action: manipulation;
+  -webkit-overflow-scrolling: touch;
+  background-color: var(--background-color);
+}
+
+#root {
+  height: 100%;
+  width: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: none;
+  overscroll-behavior-y: none;
+  touch-action: manipulation;
+  /* For scroll tracking */
+  scroll-behavior: smooth;
+  background: var(--app-shell-background);
+  background-color: var(--background-color);
+}
+
+/* Horizontal category tabs in catalog — explicit pan-x so touches aren’t treated as page vertical scroll only */
+.catalog-level3-tabs-scroll {
+  touch-action: pan-x !important;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.catalog-level3-tabs-scroll .catalog-level3-tab-btn,
+.catalog-level3-tabs-scroll .catalog-level3-tab-btn > * {
+  touch-action: pan-x !important;
+}
+
+
+
+@supports (-webkit-touch-callout: none) {
+  @media (hover: none) and (pointer: coarse) {
+    .alert {
+      border-radius: 14px;
+    }
+
+    .card {
+      border-radius: 18px;
+    }
+  }
+}
+
+/* Sticky header fix for iOS */
+.sticky-top,
+[style*="position: sticky"] {
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
+  will-change: transform;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+/* Prevent content jump when scrolling */
+.navbar {
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
+}
+
+body {
+  font-family: var(--app-font-family);
+  background: var(--app-shell-background);
+  color: var(--text-color);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+input, button, select, textarea {
+  font-family: inherit;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  letter-spacing: -0.02em;
+  color: var(--text-color);
+}
+
+.login-shell {
+  position: relative;
+  overflow: hidden;
+}
+
+.login-shell::before {
+  content: "";
+  position: absolute;
+  inset: 6% 8%;
+  border-radius: 32px;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(59, 130, 246, 0.16), transparent 45%),
+    radial-gradient(circle at 85% 15%, rgba(71, 85, 105, 0.12), transparent 42%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.16));
+  z-index: -1;
+  border: 1px solid rgba(71, 85, 105, 0.08);
+}
+
+.login-card {
+  border: 1px solid rgba(71, 85, 105, 0.12);
+  background: rgba(255, 255, 255, 0.97);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 28px 56px rgba(15, 23, 42, 0.16) !important;
+}
+
+.login-context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(71, 85, 105, 0.08);
+  border: 1px solid rgba(71, 85, 105, 0.12);
+  color: var(--primary-color);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.login-password-toggle {
+  min-width: 46px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.login-inline-link {
+  border: none;
+  background: transparent;
+  color: var(--primary-color);
+  font-size: 0.9rem;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.login-inline-link:disabled {
+  opacity: 0.6;
+}
+
+.login-forgot-panel {
+  border: 1px solid rgba(71, 85, 105, 0.14);
+  background: #f8fafc;
+  border-radius: 12px;
+  padding: 12px;
+}
+
+.btn-primary {
+  /* Также задаём Bootstrap-переменные кнопки, чтобы любой .btn-primary (в т.ч.
+     в модалках витрины) брал основной цвет темы/кастома, а не дефолтный. */
+  --bs-btn-bg: var(--primary-color);
+  --bs-btn-border-color: var(--primary-color);
+  --bs-btn-hover-bg: var(--primary-dark);
+  --bs-btn-hover-border-color: var(--primary-dark);
+  --bs-btn-active-bg: var(--primary-dark);
+  --bs-btn-active-border-color: var(--primary-dark);
+  --bs-btn-disabled-bg: var(--primary-color);
+  --bs-btn-disabled-border-color: var(--primary-color);
+  background: linear-gradient(135deg, var(--primary-light), var(--primary-color));
+  border-color: rgba(71, 85, 105, 0.18);
+  box-shadow: 0 10px 22px rgba(71, 85, 105, 0.2);
+}
+
+.btn-primary:hover {
+  background: linear-gradient(135deg, var(--primary-color), var(--primary-dark));
+  border-color: rgba(71, 85, 105, 0.24);
+}
+
+.btn-outline-primary {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+
+.btn-outline-primary:hover {
+  background-color: var(--primary-color);
+  border-color: var(--primary-color);
+}
+
+.btn-warning,
+.btn-outline-warning {
+  color: #1a1a1a;
+}
+
+.card {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  border: 1px solid rgba(71, 85, 105, 0.08);
+  transition: transform 0.2s, box-shadow 0.2s;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 255, 255, 0.92));
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-hover);
+}
+
+.form-control,
+.form-select {
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background-color: #fff;
+}
+
+.form-control:focus,
+.form-select:focus {
+  border-color: var(--primary-light);
+  box-shadow: 0 0 0 0.25rem rgba(71, 85, 105, 0.14);
+}
+
+.modal-content {
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(71, 85, 105, 0.12);
+  box-shadow: 0 20px 46px rgba(15, 23, 42, 0.14);
+}
+
+.navbar {
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+}
+
+.navbar-dark {
+  background: linear-gradient(135deg, #64748b, #475569) !important;
+}
+
+.navbar-dark .navbar-brand,
+.navbar-dark .nav-link {
+  color: #f5f3ee !important;
+}
+
+.navbar-dark .nav-link:hover {
+  color: var(--accent-color) !important;
+}
+
+.badge {
+  font-weight: 600;
+}
+
+.table thead {
+  background: #f3f4f6;
+}
+
+.table th {
+  font-weight: 600;
+  color: #2a2a2a;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.table td {
+  border-color: var(--border-color);
+  vertical-align: middle;
+}
+
+.text-muted {
+  color: var(--text-secondary) !important;
+}
+
+.shadow,
+.shadow-sm {
+  box-shadow: var(--shadow) !important;
+}
+
+.dropdown-menu {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  box-shadow: var(--shadow);
+}
+
+.modal-header {
+  border-bottom: 1px solid var(--border-color);
+}
+
+.modal-footer {
+  border-top: 1px solid var(--border-color);
+}
+
+/* Client product gallery modal */
+.product-gallery-modal .modal-dialog {
+  max-width: 100vw;
+}
+
+.product-details-modal-fullscreen.modal {
+  z-index: 1200 !important;
+  padding-right: 0 !important;
+}
+
+.modal-backdrop.product-details-backdrop {
+  z-index: 1190 !important;
+  background: rgba(15, 23, 42, 0.46) !important;
+}
+
+.modal-backdrop.product-details-backdrop.show {
+  opacity: 1 !important;
+}
+
+.product-details-modal-fullscreen .modal-dialog,
+.product-details-modal-dialog {
+  width: 100vw !important;
+  max-width: 100vw !important;
+  height: 100dvh;
+  min-height: 100vh;
+  margin: 0 !important;
+}
+
+.product-details-modal-fullscreen .modal-content {
+  width: 100vw !important;
+  height: 100dvh;
+  min-height: 100vh;
+  border-radius: 0;
+  border: none;
+  box-shadow: none;
+  background: #f3f4f6;
+  overflow: hidden;
+}
+
+/* Bootstrap fullscreen вешает на .modal-body overflow-y:auto, из-за чего скролл
+   делили ДВА контейнера (modal-body и .product-details-scroll). Колесо доставалось
+   внутреннему, который почти не переполнялся, поэтому страница не прокручивалась —
+   двигать можно было только перетаскивая сам ползунок. Делаем .product-details-scroll
+   единственным скроллером: modal-body не скроллит, а у flex-ребёнка min-height:0. */
+.product-details-modal-fullscreen .product-details-modal-body {
+  height: 100%;
+  padding: 0 !important;
+  overflow: hidden !important;
+}
+
+.product-details-shell {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.product-details-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.product-details-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.product-details-hero {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: clamp(280px, 46vh, 420px);
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.product-details-hero-image-btn {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #ffffff;
+  padding: 0;
+  cursor: zoom-in;
+  touch-action: auto;
+}
+
+.product-details-hero-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.product-details-hero-empty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+  font-size: 3rem;
+}
+
+.product-details-top-actions {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: calc(10px + env(safe-area-inset-top, 0px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  z-index: 3;
+}
+
+.product-details-icon-btn {
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #1f2937;
+  font-size: 21px;
+  line-height: 1;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+}
+
+.product-details-icon-btn svg {
+  display: block;
+}
+
+.product-details-icon-glyph {
+  display: block;
+  line-height: 1;
+  transform: translateY(-1px);
+}
+
+.product-details-hero-counter {
+  position: absolute;
+  right: 12px;
+  bottom: 26px;
+  z-index: 5;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 0.82rem;
+}
+
+.product-details-weekly-metric {
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(59, 130, 246, 0.22);
+  background: rgba(59, 130, 246, 0.08);
+  color: #1e3a8a;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.product-details-sheet {
+  position: relative;
+  z-index: 2;
+  margin-top: -18px;
+  border-radius: 20px 20px 0 0;
+  padding: 14px 14px calc(108px + env(safe-area-inset-bottom, 0px));
+  background: #f3f4f6;
+  box-shadow: 0 -10px 26px rgba(15, 23, 42, 0.08);
+}
+
+.product-details-block {
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(71, 85, 105, 0.14);
+  background: #ffffff;
+}
+
+.product-parcel-specs {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+/* Каждый параметр — отдельной строкой: подпись слева, значение справа.
+   Длинные значения переносятся, ничего не вылезает. */
+.product-parcel-spec {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 7px 0;
+  border-top: 1px solid rgba(71, 85, 105, 0.12);
+}
+.product-parcel-spec:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+.product-parcel-spec-label {
+  flex: 0 0 auto;
+  font-size: 0.8rem;
+  color: inherit;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+.product-parcel-spec-value {
+  min-width: 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: inherit;
+  text-align: right;
+  word-break: break-word;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.product-parcel-spec-flag {
+  flex-shrink: 0;
+  width: 1.25rem;
+  height: auto;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.1);
+}
+.product-details-contact-phone {
+  color: var(--primary-color, #0f766e);
+  font-weight: 700;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.product-details-contact-phone:hover {
+  text-decoration: underline;
+}
+/* Скрытый номер продавца — точки + «показать» (как в Telegram) */
+.product-details-phone-reveal {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+}
+.product-details-phone-dots {
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #64748b;
+}
+.product-details-phone-show {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--primary-color, #0f766e);
+  text-transform: lowercase;
+  border: 1px solid color-mix(in srgb, var(--primary-color, #0f766e) 40%, transparent);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.product-details-phone-reveal:hover .product-details-phone-show {
+  background: color-mix(in srgb, var(--primary-color, #0f766e) 10%, transparent);
+}
+/* Счётчик просмотров внизу карточки */
+.product-details-views {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 2px 2px 6px;
+  color: #94a3b8;
+  font-size: 0.82rem;
+}
+.product-details-views .bi-eye {
+  font-size: 0.95rem;
+}
+
+.product-details-variants-scroll {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.product-details-variants-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.product-details-review-item {
+  border: 1px solid rgba(71, 85, 105, 0.14);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #f8fafc;
+}
+
+.product-details-bottom-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+  background: linear-gradient(180deg, rgba(243, 244, 246, 0), rgba(243, 244, 246, 0.95) 26%, #f3f4f6 62%);
+}
+
+.product-details-bottom-inner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.product-details-bottom-stepper {
+  min-width: 122px;
+  height: 46px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(71, 85, 105, 0.2);
+  background: rgba(71, 85, 105, 0.1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  position: relative;
+  z-index: 6;
+}
+
+.product-details-bottom-stepper button {
+  width: 32px;
+  height: 32px;
+  font-size: 22px;
+  color: #334155;
+  line-height: 1;
+  cursor: pointer;
+  pointer-events: auto;
+  position: relative;
+  z-index: 1;
+}
+
+.product-details-bottom-stepper span {
+  min-width: 22px;
+  text-align: center;
+  color: #111827;
+  font-weight: 700;
+}
+
+/* Кнопка «В корзину»: React-Bootstrap <Button> добавляет .btn-primary, чей
+   --bs-btn-bg перебивал наш фон. Поднимаем специфичность и берём цвет темы. */
+.product-details-bottom-cta,
+.product-details-bottom-cta.btn,
+.product-details-bottom-cta.btn-primary {
+  flex: 1 1 auto;
+  min-height: 46px;
+  border-radius: 999px;
+  border: 1px solid var(--primary-color) !important;
+  background: var(--primary-color) !important;
+  color: #fff !important;
+  font-size: 1.03rem;
+  font-weight: 700;
+}
+.product-details-bottom-cta.btn-primary:hover,
+.product-details-bottom-cta.btn-primary:focus,
+.product-details-bottom-cta.btn-primary:active,
+.product-details-bottom-cta.btn:hover,
+.product-details-bottom-cta.btn:focus,
+.product-details-bottom-cta.btn:active {
+  background: var(--primary-dark, var(--primary-color)) !important;
+  border-color: var(--primary-dark, var(--primary-color)) !important;
+  color: #fff !important;
+}
+.product-details-bottom-cta.btn:disabled,
+.product-details-bottom-cta.btn.disabled {
+  background: var(--primary-color) !important;
+  border-color: var(--primary-color) !important;
+  color: #fff !important;
+  opacity: 0.55;
+}
+
+.product-gallery-modal.modal {
+  z-index: 1320 !important;
+  padding-right: 0 !important;
+}
+
+.modal-backdrop.product-gallery-backdrop {
+  z-index: 1310 !important;
+  background: rgba(0, 0, 0, 0.88) !important;
+}
+
+.modal-backdrop.product-gallery-backdrop.show {
+  opacity: 1 !important;
+}
+
+.product-gallery-dialog {
+  width: 100vw !important;
+  max-width: 100vw !important;
+  height: 100dvh;
+  min-height: 100vh;
+  margin: 0 !important;
+}
+
+.product-gallery-modal .modal-content {
+  width: 100vw !important;
+  height: 100dvh;
+  min-height: 100vh;
+  border: none;
+  border-radius: 0;
+  background: #000;
+  overflow: hidden;
+}
+
+.product-gallery-modal-body {
+  position: relative;
+  height: 100%;
+  background: #000;
+}
+
+.product-gallery-close-btn {
+  position: absolute;
+  top: calc(10px + env(safe-area-inset-top, 0px));
+  right: 12px;
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  border-radius: 999px;
+  background: rgba(2, 6, 23, 0.6);
+  color: #fff;
+  display: inline-grid;
+  place-items: center;
+  z-index: 5;
+}
+
+.product-gallery-close-glyph {
+  line-height: 1;
+  font-size: 24px;
+  transform: translateY(-1px);
+}
+
+.product-gallery-frame {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  overflow: hidden;
+  border: none;
+  border-radius: 0;
+  background: #000;
+  touch-action: none;
+}
+
+.product-gallery-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  background: #fff;
+}
+
+.product-gallery-nav-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px;
+  height: 44px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(2, 6, 23, 0.58);
+  color: #fff;
+  font-size: 28px;
+  line-height: 1;
+  display: inline-grid;
+  place-items: center;
+}
+
+.product-gallery-nav-glyph {
+  display: block;
+  line-height: 1;
+  transform: translateY(-1px);
+}
+
+.product-gallery-nav-btn-prev {
+  left: 12px;
+}
+
+.product-gallery-nav-btn-next {
+  right: 12px;
+}
+
+.product-gallery-counter {
+  position: absolute;
+  right: 12px;
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(2, 6, 23, 0.66);
+  color: #fff;
+  font-size: 0.9rem;
+  z-index: 4;
+}
+
+@media (max-width: 576px) {
+  .product-gallery-modal .modal-dialog {
+    margin: 0 !important;
+  }
+
+  .product-gallery-frame {
+    height: 100%;
+  }
+
+  .product-details-hero {
+    height: clamp(250px, 42vh, 360px);
+  }
+
+  .product-details-hero-counter {
+    bottom: 32px;
+  }
+
+  .product-details-sheet {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+}
+
+/* Анимированный логотип магазина — заменяет скелетоны на витрине. Без кольца, только пульсация. */
+@keyframes storefront-loader-pulse {
+  0%, 100% { transform: scale(0.92); }
+  50%      { transform: scale(1.08); }
+}
+@keyframes storefront-loader-dot {
+  0%, 80%, 100% { opacity: 0.2; transform: translateY(0); }
+  40%           { opacity: 1;   transform: translateY(-3px); }
+}
+.storefront-loader-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+.storefront-loader-inline {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 56px 16px;
+}
+.storefront-loader-logo {
+  width: 96px;
+  height: 96px;
+  object-fit: contain;
+  display: block;
+  animation: storefront-loader-pulse 1.4s ease-in-out infinite;
+}
+.storefront-loader-label {
+  margin-top: 18px;
+  color: #64748b;
+  font-size: 0.95rem;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+}
+.storefront-loader-dots {
+  display: inline-flex;
+  margin-left: 2px;
+}
+.storefront-loader-dots span {
+  display: inline-block;
+  animation: storefront-loader-dot 1.2s ease-in-out infinite;
+}
+.storefront-loader-dots span:nth-child(2) { animation-delay: 0.15s; }
+.storefront-loader-dots span:nth-child(3) { animation-delay: 0.30s; }
+
+/* Инлайн-кнопки управления (на мобиле скрыты, видны только на ПК) */
+.product-details-inline-actions { display: none; }
+
+/* Кастомные скроллбары: тонкие, светлые, одинаковая толщина по обеим осям */
+/* Скроллбар модалки деталей — кастомный, в цвет выбранной темы (--primary-color).
+   Вертикальный (модалка на ПК) делаем чуть заметнее, горизонтальный (related) тоньше. */
+/* Bootstrap fullscreen-модалка скроллит .modal-body, поэтому стилизуем и его,
+   и .product-details-scroll (на ПК) — иначе остаётся нативный широкий бар. */
+/* Скроллбары модалки деталей скрыты визуально (прокрутка работает). */
+.product-details-modal-fullscreen .modal-content,
+.product-details-modal-body,
+.product-details-scroll,
+.product-details-related-scroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.product-details-modal-fullscreen .modal-content::-webkit-scrollbar,
+.product-details-modal-body::-webkit-scrollbar,
+.product-details-scroll::-webkit-scrollbar,
+.product-details-related-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* Мобайл/WebApp: фиксированная панель «В корзину» (position:absolute) перекрывала
+   низ скролла. Запас снизу был внутри .product-details-sheet, но «Похожие товары» —
+   отдельная секция ПОСЛЕ листа, поэтому её карточки и названия пряталась за панелью.
+   Переносим запас на сам скролл-контейнер, чтобы последний блок всегда был виден. */
+@media (max-width: 991.98px) {
+  .product-details-sheet {
+    padding-bottom: 16px;
+  }
+  .product-details-scroll {
+    padding-bottom: calc(104px + env(safe-area-inset-bottom, 0px));
+  }
+  /* Отзывы вынесены из листа отдельной секцией — сохраняем боковые отступы. */
+  .product-details-reviews-section {
+    padding: 0 14px;
+  }
+  /* На мобиле поверхность модалки светло-серая — секции под неё. */
+  .product-details-related-section,
+  .product-details-reviews-section {
+    background: #f3f4f6;
+  }
+}
+
+/* Sticky-фото (.product-details-hero, z-index:1) просвечивало сквозь секции
+   «Похожие товары» и «Отзывы» (они идут ниже листа). Поднимаем их над фото
+   (z-index:2) и делаем фон непрозрачным под поверхность модалки — и на ПК, и на
+   мобиле. Светлый фон задаётся медиа-запросами (мобайл #f3f4f6 / ПК #fff). */
+.product-details-related-section,
+.product-details-reviews-section {
+  position: relative;
+  z-index: 2;
+}
+:root[data-ui-theme="verdant_glass"] .product-details-related-section,
+:root[data-ui-theme="verdant_glass"] .product-details-reviews-section {
+  background: #0c2c1b;
+}
+:root[data-ui-theme="golden_crust"] .product-details-related-section,
+:root[data-ui-theme="golden_crust"] .product-details-reviews-section {
+  background: #14100b;
+}
+
+/* Стрелки листания фото на главном изображении */
+.product-details-hero-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(255, 255, 255, 0.92);
+  color: #334155;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0 0 4px;
+  z-index: 3;
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+.product-details-hero-nav:hover {
+  background: #ffffff;
+  border-color: rgba(100, 116, 139, 0.7);
+}
+.product-details-hero-nav-prev { left: 10px; }
+.product-details-hero-nav-next { right: 10px; }
+
+/* Горизонтальный карусель похожих товаров */
+.product-details-related-scroll {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 6px;
+}
+.product-details-related-card {
+  flex: 0 0 132px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 12px;
+  background: #fff;
+  text-align: left;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* ПК-вид карточки товара: центрированный контейнер, 2 колонки + строка с related снизу. */
+@media (min-width: 992px) {
+  .product-details-modal-fullscreen .modal-dialog,
+  .product-details-modal-dialog {
+    width: min(100%, 1200px) !important;
+    max-width: 1200px !important;
+    height: auto;
+    min-height: 0;
+    margin: 32px auto !important;
+    max-height: calc(100vh - 64px);
+  }
+  .product-details-modal-fullscreen .modal-content {
+    width: auto !important;
+    height: auto;
+    min-height: 0;
+    max-height: calc(100vh - 64px);
+    border-radius: 18px;
+    /* На ПК скроллит сам .modal-content (у него есть max-height) — иначе контент
+       ниже сгиба (похожие товары, отзывы) обрезался и не прокручивался. */
+    overflow-y: auto;
+    overflow-x: hidden;
+    background: #ffffff;
+    box-shadow: none;
+    border: 1px solid #e5e7eb;
+  }
+  .product-details-modal-fullscreen .product-details-modal-body { overflow: visible !important; }
+  .product-details-modal-body { background: #ffffff; }
+  /* 3-зонный grid: hero | info, затем related во всю ширину */
+  .product-details-scroll {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+      "hero info"
+      "related related"
+      "reviews reviews";
+    column-gap: 36px;
+    row-gap: 24px;
+    padding: 24px 32px 16px;
+    align-items: start;
+    background: #ffffff;
+    overflow: visible;
+    min-height: 0;
+  }
+  .product-details-hero {
+    grid-area: hero;
+    /* Не липкое (вся верхняя строка скроллится вместе), но relative — чтобы
+       кнопки поверх фото (назад/избранное/поделиться/×) и стрелки ‹ › крепились
+       к фото, а не к контейнеру модалки. */
+    position: relative;
+    height: auto;
+    aspect-ratio: 1 / 1;
+    max-height: 520px;
+    border-radius: 14px;
+    overflow: hidden;
+    border: 1px solid #e5e7eb;
+    background: #f8fafc;
+    box-shadow: none;
+  }
+  .product-details-hero-image-btn { background: #ffffff; }
+  .product-details-hero-image { object-fit: contain; background: #ffffff; }
+  .product-details-top-actions { left: 12px; right: 12px; top: 12px; }
+  .product-details-icon-btn { box-shadow: none; }
+  .product-details-sheet {
+    grid-area: info;
+    padding-left: 4px !important;
+    padding-right: 4px !important;
+    padding-top: 4px !important;
+    /* На ПК не нужен большой нижний отступ под мобильную плавающую кнопку —
+       из-за него «Похожие товары» уезжали далеко вниз. */
+    padding-bottom: 8px !important;
+    /* Белый фон как у левой части — без отдельной серой подложки. */
+    background: #ffffff;
+    box-shadow: none;
+    margin-top: 0;
+    border-radius: 0;
+  }
+  .product-details-block { box-shadow: none !important; }
+  .product-details-related-section { grid-area: related; }
+  .product-details-reviews-section { grid-area: reviews; }
+  /* На ПК поверхность модалки белая — секции (перекрывающие sticky-фото) тоже. */
+  .product-details-related-section,
+  .product-details-reviews-section {
+    background: #ffffff;
+  }
+
+  /* Инлайн «В корзину»/кол-во сразу после цены */
+  .product-details-inline-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+  .product-details-inline-actions .product-details-bottom-cta { flex: 1; }
+  .product-details-inline-actions .product-details-bottom-stepper { flex: 0 0 auto; }
+
+  /* На ПК нижняя панель не нужна — управление перенесено в правую колонку */
+  .product-details-bottom-bar { display: none !important; }
+}
+
+/* Admin panel button styles - black background, white text */
+.admin-panel .btn-outline-primary,
+.admin-panel .btn-outline-secondary,
+.admin-panel .btn-outline-success,
+.admin-panel .btn-outline-danger,
+.admin-panel .btn-outline-warning,
+.admin-panel .btn-outline-info {
+  background-color: #eef2f7 !important;
+  border-color: #cbd5e1 !important;
+  color: #374151 !important;
+}
+
+.admin-panel .btn-outline-primary:hover,
+.admin-panel .btn-outline-secondary:hover,
+.admin-panel .btn-outline-success:hover,
+.admin-panel .btn-outline-danger:hover,
+.admin-panel .btn-outline-warning:hover,
+.admin-panel .btn-outline-info:hover {
+  background-color: #e2e8f0 !important;
+  border-color: #94a3b8 !important;
+  color: #1f2937 !important;
+}
+
+/* Admin panel tab styles - black text */
+.admin-panel .nav-tabs .nav-link {
+  color: #374151 !important;
+  font-weight: 500;
+}
+
+.admin-panel .nav-tabs .nav-link:hover {
+  color: #1f2937 !important;
+}
+
+.admin-panel .nav-tabs .nav-link.active {
+  color: #1f2937 !important;
+  font-weight: 600;
+  border-bottom: 2px solid #475569;
+}
+
+/* Order Status Stepper */
+.order-stepper {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 20px 30px;
+  position: relative;
+  overflow: hidden;
+}
+
+.stepper-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+  z-index: 2;
+  flex: 1;
+}
+
+.stepper-circle {
+  width: 45px;
+  height: 45px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 16px;
+  color: #ffffff;
+  background: #cbd5e1;
+  border: 3px solid #cbd5e1;
+  transition: all 0.3s ease;
+  cursor: pointer;
+  position: relative;
+}
+
+.stepper-circle:hover {
+  transform: scale(1.1);
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+}
+
+.stepper-step.completed .stepper-circle {
+  background: #475569;
+  border-color: #475569;
+}
+
+.stepper-step.active .stepper-circle {
+  animation: radar-pulse 1.5s ease-in-out infinite;
+}
+
+.stepper-step[data-step="1"] .stepper-circle {
+  background: #94a3b8;
+  border-color: #94a3b8;
+}
+
+.stepper-step[data-step="2"].completed .stepper-circle,
+.stepper-step[data-step="2"].active .stepper-circle {
+  background: #64748b;
+  border-color: #64748b;
+}
+
+.stepper-step[data-step="3"].completed .stepper-circle,
+.stepper-step[data-step="3"].active .stepper-circle {
+  background: #475569;
+  border-color: #475569;
+}
+
+.stepper-step[data-step="4"].completed .stepper-circle,
+.stepper-step[data-step="4"].active .stepper-circle {
+  background: #475569;
+  border-color: #475569;
+}
+
+.stepper-step.cancelled .stepper-circle {
+  background: #dc2626 !important;
+  border-color: #dc2626 !important;
+}
+
+.stepper-step.cancelled.active .stepper-circle {
+  animation: radar-pulse-red 1.5s ease-in-out infinite;
+}
+
+@keyframes radar-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(71, 85, 105, 0.5);
+  }
+
+  50% {
+    box-shadow: 0 0 0 15px rgba(71, 85, 105, 0);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 rgba(71, 85, 105, 0);
+  }
+}
+
+@keyframes radar-pulse-red {
+  0% {
+    box-shadow: 0 0 0 0 rgba(182, 118, 93, 0.55);
+  }
+
+  50% {
+    box-shadow: 0 0 0 15px rgba(182, 118, 93, 0);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 rgba(182, 118, 93, 0);
+  }
+}
+
+.stepper-label {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #999;
+  text-align: center;
+  font-weight: 500;
+  transition: color 0.3s ease;
+}
+
+.stepper-step.completed .stepper-label,
+.stepper-step.active .stepper-label {
+  color: #333;
+  font-weight: 600;
+}
+
+.stepper-step.cancelled .stepper-label {
+  color: #b91c1c;
+}
+
+/* Stepper Line */
+.stepper-line-container {
+  position: absolute;
+  top: 42px;
+  left: 50px;
+  right: 50px;
+  height: 3px;
+  z-index: 1;
+}
+
+.stepper-line-bg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: #cbd5e1;
+  border-radius: 2px;
+}
+
+.stepper-line-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #94a3b8, #64748b, #475569, #475569);
+  border-radius: 2px;
+  transition: width 0.5s ease;
+}
+
+.stepper-line-progress.cancelled {
+  background: linear-gradient(90deg, #94a3b8, #dc2626);
+}
+
+/* Cancel reason box */
+.cancel-reason-box {
+  background: #dc2626;
+  color: white;
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin-top: 15px;
+  font-size: 14px;
+}
+
+.cancel-reason-box strong {
+  display: block;
+  margin-bottom: 5px;
+}
+
+/* Action buttons - white background, black icons */
+.btn-action {
+  background-color: #ffffff !important;
+  border-color: #d1d5db !important;
+  color: #374151 !important;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-action:hover {
+  background-color: #eef2f7 !important;
+  border-color: #94a3b8 !important;
+  color: #1f2937 !important;
+}
+
+.btn-action svg {
+  fill: #374151;
+}
+
+@media (max-width: 768px) {
+  .container {
+    padding: 0 10px;
+  }
+}
+
+/* Custom thin scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #ccc;
+  border-radius: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #aaa;
+}
+
+/* Premium horizontal scrollbar for analytics widgets */
+.premium-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #94a3b8 #eef2f7;
+}
+
+.premium-scrollbar::-webkit-scrollbar {
+  height: 6px;
+}
+
+.premium-scrollbar::-webkit-scrollbar-track {
+  background: #eef2f7;
+  border-radius: 10px;
+  margin: 0 16px;
+}
+
+.premium-scrollbar::-webkit-scrollbar-thumb {
+  background: linear-gradient(90deg, #94a3b8, #64748b);
+  border-radius: 10px;
+  transition: background 0.2s;
+}
+
+.premium-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(90deg, #64748b, #475569);
+  box-shadow: 0 0 6px rgba(71, 85, 105, 0.35);
+}
+
+/* Shared skeleton UI */
+.skeleton-shell {
+  position: relative;
+  width: min(980px, calc(100% - 24px));
+  margin: 12px auto;
+  border-radius: 22px;
+  padding: 18px 16px;
+  border: 1px solid rgba(71, 85, 105, 0.12);
+  background:
+    radial-gradient(circle at 8% 8%, rgba(59, 130, 246, 0.11), transparent 38%),
+    radial-gradient(circle at 92% 4%, rgba(71, 85, 105, 0.1), transparent 36%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(246, 248, 252, 0.95));
+  box-shadow: 0 22px 40px rgba(15, 23, 42, 0.1);
+  overflow: hidden;
+}
+
+.skeleton-shell-full {
+  min-height: 100vh;
+  width: 100%;
+  border-radius: 0;
+  margin: 0;
+  padding-top: 28px;
+}
+
+.skeleton-shell-section {
+  width: 100%;
+  margin: 0;
+  border-radius: 14px;
+  padding: 14px;
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
+}
+
+.skeleton-header {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.skeleton-card {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.75);
+  padding: 12px;
+}
+
+.skeleton-block {
+  position: relative;
+  display: block;
+  width: 100%;
+  border-radius: 999px;
+  background: #d7dee8;
+  overflow: hidden;
+}
+
+.skeleton-block::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.82) 42%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  animation: skeleton-wave 1.25s ease-in-out infinite;
+}
+
+.skeleton-line {
+  height: 11px;
+  margin-bottom: 9px;
+}
+
+.skeleton-line-title {
+  height: 16px;
+}
+
+.skeleton-line-subtitle,
+.skeleton-line-small {
+  height: 9px;
+}
+
+.skeleton-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.skeleton-list.is-dense {
+  gap: 8px;
+}
+
+.skeleton-list-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.skeleton-avatar {
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.skeleton-list-text {
+  flex: 1;
+}
+.skeleton-list-text .skeleton-line:last-child {
+  margin-bottom: 0;
+}
+
+.skeleton-table {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.86);
+  overflow: hidden;
+}
+
+.skeleton-table-row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+}
+
+.skeleton-table-head {
+  background: rgba(241, 245, 249, 0.85);
+}
+
+.skeleton-table-row:last-child {
+  border-bottom: 0;
+}
+
+.skeleton-admin-shell {
+  min-height: 100vh;
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(210px, 248px) minmax(0, 1fr);
+  gap: 0;
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+}
+
+.skeleton-admin-sidebar {
+  border-right: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(255, 255, 255, 0.82);
+  padding: 20px 14px;
+}
+
+.skeleton-admin-nav {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.skeleton-admin-main {
+  padding: 18px;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 14px;
+}
+
+.skeleton-admin-topbar {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(255, 255, 255, 0.84);
+  border-radius: 14px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.skeleton-admin-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.skeleton-admin-cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.skeleton-admin-table-wrap .skeleton-shell {
+  width: 100%;
+  margin: 0;
+}
+
+.skeleton-superadmin-shell {
+  min-height: 100vh;
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(230px, 278px) minmax(0, 1fr);
+  background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+}
+
+.skeleton-superadmin-sidebar {
+  border-right: 1px solid rgba(148, 163, 184, 0.26);
+  background: rgba(255, 255, 255, 0.86);
+  padding: 20px 15px;
+}
+
+.skeleton-superadmin-nav {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.skeleton-superadmin-main {
+  padding: 16px;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 14px;
+}
+
+.skeleton-superadmin-topbar {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(255, 255, 255, 0.88);
+  border-radius: 14px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.skeleton-superadmin-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.skeleton-superadmin-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.skeleton-superadmin-table-wrap .skeleton-shell {
+  width: 100%;
+  margin: 0;
+}
+
+.skeleton-superadmin-tab-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.skeleton-superadmin-tab-filters .skeleton-line {
+  margin-bottom: 0;
+  height: 36px;
+  border-radius: 10px;
+}
+
+.skeleton-superadmin-status-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.skeleton-superadmin-status-pills .skeleton-line {
+  margin-bottom: 0;
+  height: 32px;
+  border-radius: 999px;
+}
+
+@keyframes skeleton-wave {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@media (max-width: 576px) {
+  .skeleton-shell {
+    width: calc(100% - 16px);
+    border-radius: 16px;
+    padding: 14px 12px;
+  }
+
+  .skeleton-shell-full {
+    width: 100%;
+    border-radius: 0;
+  }
+
+  .skeleton-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .skeleton-table-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .skeleton-admin-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .skeleton-admin-sidebar {
+    display: none;
+  }
+
+  .skeleton-admin-main {
+    padding: 12px;
+  }
+
+  .skeleton-admin-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .skeleton-superadmin-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .skeleton-superadmin-sidebar {
+    display: none;
+  }
+
+  .skeleton-superadmin-main {
+    padding: 12px;
+  }
+
+  .skeleton-superadmin-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+}
+
+/* Unified client empty state (matches Catalog style) */
+.client-empty-state-emoji {
+  font-size: 4rem;
+  opacity: 0.5;
+  line-height: 1;
+}
+
+.client-empty-state-message,
+.client-empty-state-submessage {
+  font-size: 1rem;
+}
+
+/* Shared client page structure */
+.client-page {
+  min-height: 100%;
+}
+
+.client-content {
+  max-width: 600px !important;
+  padding-top: 16px;
+  padding-bottom: 0;
+}
+
+.client-content--narrow {
+  max-width: 600px !important;
+}
+
+.client-content--compact {
+  max-width: 500px !important;
+}
+
+.client-reservation-page {
+  background: #f6f8fb;
+}
+
+.client-reservation-content {
+  max-width: min(1380px, calc(100vw - 12px)) !important;
+  padding-top: 0;
+  padding-inline: 8px;
+}
+
+.client-res-controls-overlay {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  z-index: 14;
+  border: 0;
+  border-radius: 18px;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  padding: 0;
+}
+
+.client-res-controls-overlay.is-collapsed {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.client-res-controls-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 44px;
+  gap: 8px;
+  margin-bottom: 0;
+  padding: 8px 10px 6px;
+  border-bottom: 0;
+  background: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+  user-select: none;
+  border-radius: 18px 18px 0 0;
+}
+
+.client-res-controls-head:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, 0.42);
+  outline-offset: 2px;
+  border-radius: 10px;
+}
+
+.client-res-controls-title-line {
+  min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.client-res-controls-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 12px;
+}
+
+.client-res-controls-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 1px;
+  padding-left: 0;
+}
+
+.client-res-controls-action-slot {
+  flex: 0 0 auto;
+  min-height: 32px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+}
+
+.client-res-controls-date-value {
+  color: #0f172a;
+  font-size: 0.88rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.client-res-controls-next-btn {
+  min-width: 90px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0.42rem 0.85rem;
+  background: #4f46e5;
+  color: #ffffff;
+  font-weight: 700;
+  line-height: 1.1;
+  box-shadow: 0 8px 18px rgba(67, 56, 202, 0.24);
+}
+
+.client-res-controls-next-btn.is-hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.client-res-controls-next-btn:hover,
+.client-res-controls-next-btn:focus-visible {
+  color: #ffffff;
+  background: linear-gradient(135deg, #4338ca 0%, #5b5af4 100%);
+}
+
+.client-res-controls-floor-line {
+  display: block;
+  color: #475569;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.client-res-top-title {
+  color: #0f172a;
+  font-size: 1rem;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.client-res-top-subtitle {
+  color: #64748b;
+  font-size: 0.88rem;
+  line-height: 1.2;
+}
+
+.client-res-collapse-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 12px;
+  border: 1px solid rgba(173, 188, 214, 0.86);
+  background: rgba(245, 248, 255, 0.82);
+  color: #334155;
+  font-size: 14px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.client-res-controls-stack {
+  margin-top: 0;
+  padding: 0 10px 10px;
+  border-bottom: 0;
+  background: rgba(255, 255, 255, 0.9);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(92px, 0.42fr);
+  gap: 8px;
+  border-radius: 0 0 18px 18px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.1);
+}
+
+.client-res-overlay-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.client-res-overlay-row-time {
+  gap: 5px;
+}
+
+.client-res-overlay-label {
+  color: #7c8799;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.client-res-overlay-input {
+  width: 100%;
+  min-height: 36px;
+  border-radius: 12px;
+  border: 1px solid #d9e1ee;
+  background: #ffffff;
+  color: #0f172a;
+  font-size: 0.9rem;
+}
+
+.client-res-overlay-input:focus {
+  border-color: #a9b8de;
+  box-shadow: 0 0 0 0.16rem rgba(99, 102, 241, 0.18);
+}
+
+.client-res-overlay-value-preview {
+  font-size: 0.76rem;
+  color: #475569;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.client-res-time-readout {
+  margin-top: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 0.86rem;
+}
+
+.client-res-time-ruler {
+  margin-top: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scroll-behavior: smooth;
+  scroll-snap-type: x proximity;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--background-color);
+  padding: 5px 0 4px;
+}
+
+.client-res-time-ruler::before,
+.client-res-time-ruler::after {
+  content: '';
+  flex: 0 0 max(74px, calc(50% - 32px));
+}
+
+.client-res-time-ruler::-webkit-scrollbar {
+  height: 4px;
+}
+
+.client-res-time-ruler::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.42);
+  border-radius: 999px;
+}
+
+.client-res-ruler-tick {
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  min-width: 52px;
+  padding: 0;
+  margin: 0;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  cursor: pointer;
+  scroll-snap-align: center;
+  opacity: 0.36;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.client-res-ruler-line {
+  display: block;
+  width: 2px;
+  height: 11px;
+  border-radius: 999px;
+  background: var(--border-color);
+}
+
+.client-res-ruler-tick.is-hour .client-res-ruler-line {
+  height: 19px;
+  background: var(--text-secondary);
+}
+
+.client-res-ruler-tick.is-active .client-res-ruler-line {
+  height: 23px;
+  background: var(--primary-color);
+}
+
+.client-res-ruler-tick.is-active {
+  opacity: 1;
+  transform: translateY(-1px);
+}
+
+.client-res-ruler-label {
+  margin-top: 3px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.client-res-ruler-tick.is-hour .client-res-ruler-label {
+  color: var(--text-color);
+}
+
+.client-res-ruler-tick.is-active .client-res-ruler-label {
+  color: var(--primary-color);
+}
+
+.client-res-ruler-end {
+  display: block;
+  width: 10px;
+  height: 1px;
+}
+
+.client-res-map-shell {
+  margin-top: 0;
+  width: 100vw;
+  margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+  background: var(--background-color);
+  position: relative;
+  min-height: calc(100dvh - 82px);
+  overscroll-behavior: none;
+  overscroll-behavior-x: none;
+  overscroll-behavior-y: none;
+}
+
+.client-res-map-shell .client-res-plan-stage {
+  height: calc(100dvh - 82px);
+  min-height: 500px;
+  border: 0;
+  border-radius: 0;
+}
+
+.client-res-map-shell.is-controls-collapsed .client-res-plan-stage {
+  height: calc(100dvh - 82px);
+}
+
+.client-res-map-shell:fullscreen .client-res-plan-stage {
+  height: 100vh;
+  min-height: 100vh;
+}
+
+.client-res-view-switch {
+  position: absolute;
+  top: 108px;
+  left: 10px;
+  z-index: 13;
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid rgba(214, 222, 239, 0.92);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.1);
+}
+
+.client-res-view-switch button {
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #64748b;
+  min-width: 70px;
+  height: 30px;
+  padding: 0 12px;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.client-res-view-switch button.is-active {
+  background: #0f172a;
+  color: #ffffff;
+}
+
+.client-res-list-stage {
+  position: relative;
+  height: calc(100dvh - 82px);
+  min-height: 500px;
+  padding: 68px 10px 112px; /* Reduced top padding since accordion is removed */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--background-color);
+  scrollbar-width: none; /* Hide scrollbar Firefox */
+  -ms-overflow-style: none; /* Hide scrollbar IE/Edge */
+}
+.client-res-list-stage::-webkit-scrollbar {
+  display: none; /* Hide scrollbar Chrome/Safari/Opera */
+  width: 0;
+  height: 0;
+}
+
+.client-res-place-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.client-res-place-card {
+  width: 100%;
+  border: 1px solid var(--border-color);
+  border-radius: 18px;
+  background: var(--surface-color);
+  color: var(--text-color);
+  padding: 9px;
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 10px;
+  text-align: left;
+  box-shadow: var(--shadow);
+}
+
+.client-res-place-card.is-selected {
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 2px var(--primary-color), var(--shadow-hover);
+}
+
+.client-res-place-card.is-disabled {
+  opacity: 0.56;
+}
+
+.client-res-place-photo {
+  width: 92px;
+  aspect-ratio: 1 / 1;
+  border-radius: 14px;
+  background: var(--background-color);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: 1.2rem;
+  font-weight: 800;
+}
+
+.client-res-place-photo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.client-res-place-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  justify-content: center;
+}
+
+.client-res-place-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.client-res-place-title {
+  min-width: 0;
+  color: var(--text-color);
+  font-family: var(--app-font-family);
+  font-size: 0.95rem;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.client-res-place-price {
+  flex: 0 0 auto;
+  color: var(--primary-color);
+  font-family: var(--app-font-family);
+  font-size: 0.82rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.client-res-place-meta {
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.client-res-place-description {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.client-res-place-status {
+  margin-top: 2px;
+  color: var(--primary-color);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.client-res-place-details-card {
+  max-width: 560px;
+  margin-inline: auto;
+  border-radius: 24px;
+  overflow: hidden;
+}
+
+.client-res-place-details-hero {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  border-radius: 20px;
+  background: var(--background-color);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: 2rem;
+  font-weight: 900;
+}
+
+.client-res-place-details-hero img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.client-res-place-details-head {
+  margin-top: 16px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.client-res-place-details-head h2 {
+  margin: 0;
+  color: var(--text-color);
+  font-size: 1.25rem;
+  line-height: 1.15;
+  font-weight: 900;
+}
+
+.client-res-place-details-meta {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.client-res-place-details-price {
+  flex: 0 0 auto;
+  color: var(--primary-color);
+  font-size: 0.96rem;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.client-res-place-details-description {
+  margin: 14px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.client-res-place-details-body {
+  position: relative;
+  padding-bottom: 74px !important;
+}
+
+.client-res-place-action-row {
+  margin-top: 6px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.client-res-view-details-btn {
+  background: var(--background-color);
+  border: none;
+  outline: none;
+  color: var(--primary-color);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.client-res-view-details-btn:hover {
+  background: var(--border-color);
+  color: var(--primary-dark);
+}
+
+.client-res-sticky-bottom-bar {
+  position: sticky;
+  bottom: -20px;
+  left: -20px;
+  right: -20px;
+  background: var(--surface-color);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  padding: 12px 20px;
+  border-top: 1px solid var(--border-color);
+  margin: 16px -20px -20px -20px;
+  z-index: 10;
+  border-bottom-left-radius: 16px;
+  border-bottom-right-radius: 16px;
+}
+
+.client-res-floor-tabs-wrapper {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: 10px;
+  z-index: 100;
+  padding: 4px 0;
+}
+
+/* Horizontal scrollable floor tabs */
+.client-res-floor-tabs-scroll {
+  display: flex;
+  overflow-x: auto;
+  gap: 8px;
+  padding: 8px 0;
+  margin-top: 4px;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.client-res-floor-tabs-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.client-res-floor-tab-btn {
+  background: var(--surface-color);
+  border: none;
+  outline: none;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 6px 16px;
+  border-radius: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+}
+
+.client-res-floor-tab-btn:hover {
+  background: var(--border-color);
+  color: var(--text-color);
+}
+
+.client-res-floor-tab-btn.is-active {
+  background: var(--primary-color);
+  border: none;
+  color: #ffffff;
+}
+
+/* Floating bottom selection bar */
+.client-res-sticky-bottom-selection-bar {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 640px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  padding: 12px 20px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 -10px 30px rgba(15, 23, 42, 0.08);
+  z-index: 15;
+}
+
+.client-res-bottom-selection-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.client-res-bottom-selection-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.client-res-bottom-selection-count {
+  font-size: 1rem;
+  color: var(--primary-color);
+  font-weight: 800;
+}
+
+.client-res-bottom-next-btn {
+  font-size: 0.88rem;
+  font-weight: 700;
+  padding: 8px 24px;
+  border-radius: 999px;
+  background: var(--primary-color);
+  color: #ffffff;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12);
+  transition: all 0.2s ease;
+}
+
+.client-res-bottom-next-btn:hover {
+  background: var(--primary-dark);
+  color: #ffffff;
+}
+
+.client-res-time-ruler--details {
+  margin-top: 0;
+  padding: 9px 0 6px;
+  background: #ffffff;
+  border-color: #e1e7f0;
+}
+
+.client-res-map-loading {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid #d6deef;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  color: #334155;
+}
+
+.client-res-map-empty {
+  position: absolute;
+  top: 52%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 9;
+  background: transparent;
+  border: none;
+  padding: 9px 12px;
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: #64748b;
+  text-align: center;
+  max-width: min(84vw, 320px);
+}
+
+.client-res-details-card {
+  border-radius: 16px;
+}
+
+.client-res-map-next-overlay {
+  position: absolute;
+  left: 50%;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 11;
+}
+
+.client-res-time-strip {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: max(8px, calc(env(safe-area-inset-bottom) + 6px));
+  z-index: 12;
+  border: 1px solid rgba(214, 222, 239, 0.92);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.12);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  padding: 8px;
+}
+
+.client-res-time-strip-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding-inline: 2px;
+}
+
+.client-res-time-strip-label {
+  color: #7c8799;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.client-res-time-strip-value {
+  color: #0f172a;
+  font-size: 0.94rem;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.client-res-time-strip-range {
+  color: #1f2937;
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.client-res-time-ruler--floating {
+  background: #ffffff;
+  border-color: #e1e7f0;
+  border-radius: 14px;
+  padding-block: 7px 5px;
+}
+
+.client-res-top-card .card-body {
+  padding: 14px;
+}
+
+.client-res-top-card {
+  background: linear-gradient(170deg, #17080f 0%, #251026 52%, #301339 100%);
+  color: #f8fafc;
+}
+
+.client-res-top-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.client-res-top-card .client-res-top-title {
+  font-size: clamp(1rem, 1.55vw, 1.22rem);
+  font-weight: 800;
+  color: #f8fafc;
+}
+
+.client-res-top-card .client-res-top-subtitle {
+  margin-top: 2px;
+  font-size: 0.9rem;
+  color: rgba(248, 250, 252, 0.82);
+}
+
+.client-res-top-controls {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.client-res-date-input,
+.client-res-duration-input {
+  min-width: 148px;
+}
+
+.client-res-date-input,
+.client-res-duration-input,
+.client-res-top-card .form-control,
+.client-res-top-card .form-select {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: #f8fafc;
+}
+
+.client-res-top-card .form-control:focus,
+.client-res-top-card .form-select:focus {
+  border-color: rgba(255, 255, 255, 0.48);
+  box-shadow: 0 0 0 0.2rem rgba(129, 140, 248, 0.22);
+}
+
+.client-res-top-card .form-select option {
+  color: #111827;
+  background: #ffffff;
+}
+
+.client-res-top-card .client-res-time-readout {
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 0.92rem;
+  color: rgba(241, 245, 249, 0.92);
+}
+
+.client-res-top-card .client-res-time-readout strong {
+  color: #ffffff;
+  font-size: 1.14rem;
+}
+
+.client-res-time-slider {
+  width: 100%;
+  margin-top: 8px;
+  accent-color: #f8fafc;
+}
+
+.client-res-time-hour-strip {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.client-res-time-hour-btn {
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.11);
+  color: rgba(248, 250, 252, 0.9);
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.client-res-time-hour-btn.is-active {
+  border-color: rgba(255, 255, 255, 0.86);
+  background: rgba(255, 255, 255, 0.9);
+  color: #1e1b4b;
+}
+
+.client-res-plan-card .card-body {
+  padding: 8px;
+}
+
+.client-res-plan-header-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.client-res-plan-header-title-wrap {
+  min-width: 0;
+}
+
+.client-res-plan-header-title {
+  font-size: 1rem;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.client-res-plan-header-subtitle {
+  font-size: 0.82rem;
+  color: #64748b;
+}
+
+.client-res-plan-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.client-res-floor-select {
+  min-width: 170px;
+}
+
+.client-res-plan-stage-wrap {
+  position: relative;
+}
+
+.client-res-plan-stage {
+  position: relative;
+  height: clamp(450px, 72vh, 760px);
+  min-height: 360px;
+  border: 1px solid #d9deef;
+  border-radius: 16px;
+  overflow: hidden;
+  background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  overscroll-behavior: none;
+  overscroll-behavior-x: none;
+  overscroll-behavior-y: none;
+  -webkit-overflow-scrolling: auto;
+}
+
+.client-res-plan-stage.is-gesturing {
+  cursor: grabbing;
+}
+
+.client-res-plan-world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.client-res-plan-floor {
+  position: absolute;
+  inset: 0;
+  background-position: center;
+  background-size: contain;
+  background-repeat: no-repeat;
+}
+
+.client-res-plan-floor-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.client-res-plan-controls {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  z-index: 8;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.client-res-map-control-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  background: rgba(255, 255, 255, 0.92);
+  color: #334155;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 0.16s ease, transform 0.16s ease, background-color 0.16s ease;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+}
+
+.client-res-map-control-btn svg {
+  width: 17px;
+  height: 17px;
+  stroke: currentColor;
+  stroke-width: 2;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.client-res-map-control-btn:hover,
+.client-res-map-control-btn:focus-visible {
+  background: rgba(255, 255, 255, 0.95);
+  color: #1e1b4b;
+  transform: scale(1.06);
+}
+
+.client-res-map-help-btn {
+  margin-top: 2px;
+}
+
+.client-res-map-zoom-slider-wrap {
+  width: 34px;
+  height: 92px;
+  border-radius: 12px;
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.1);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 1px 0;
+  padding: 0;
+}
+
+.client-res-map-zoom-slider {
+  width: 76px;
+  height: 4px;
+  margin: 0;
+  transform: rotate(-90deg);
+  transform-origin: center center;
+  accent-color: #4f46e5;
+  cursor: pointer;
+  background: transparent;
+}
+
+.client-res-plan-table {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 14px;
+  padding: 0;
+  min-width: 34px;
+  min-height: 34px;
+  z-index: 9;
+  transition: transform 0.16s ease, filter 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+  will-change: transform;
+}
+
+.client-res-plan-table:hover,
+.client-res-plan-table:focus-visible {
+  border-color: rgba(71, 85, 105, 0.45);
+  box-shadow: 0 0 0 4px rgba(148, 163, 184, 0.2);
+}
+
+.client-res-plan-table.is-selected {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.client-res-plan-table.is-disabled {
+  opacity: 0.96;
+  filter: none;
+  cursor: not-allowed;
+}
+
+.client-res-plan-table.is-unavailable {
+  opacity: 0.96;
+  filter: none;
+  cursor: not-allowed;
+}
+
+.client-res-plan-table-visual {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 64px;
+  height: 40px;
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+.client-res-plan-table-img {
+  width: 86px;
+  height: 56px;
+  object-fit: contain;
+  pointer-events: none;
+  transition: filter 0.18s ease, opacity 0.18s ease, transform 0.18s ease;
+}
+
+.client-res-plan-table.is-available .client-res-plan-table-img {
+  filter: drop-shadow(0 0 4px rgba(22, 163, 74, 0.58));
+}
+
+.client-res-plan-table.is-unavailable .client-res-plan-table-img {
+  filter: grayscale(1) drop-shadow(0 0 4px rgba(220, 38, 38, 0.58));
+  opacity: 0.54;
+}
+
+.client-res-plan-table.is-selected .client-res-plan-table-img {
+  filter: drop-shadow(0 0 6px rgba(79, 70, 229, 0.75));
+  opacity: 0.86;
+}
+
+.client-res-plan-table-fallback {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.client-res-plan-table-center-id {
+  position: relative;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(15, 23, 42, 0.35);
+  background: rgba(255, 255, 255, 0.98);
+  color: #0f172a;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 24px;
+  text-align: center;
+  box-shadow: 0 4px 10px rgba(15, 23, 42, 0.22);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.client-res-plan-table.is-selected .client-res-plan-table-center-id {
+  border-color: rgba(49, 46, 129, 0.95);
+  background: rgba(79, 70, 229, 0.96);
+  color: #ffffff;
+  box-shadow: 0 4px 12px rgba(49, 46, 129, 0.44);
+}
+
+.client-res-plan-table.is-unavailable .client-res-plan-table-center-id {
+  border-color: rgba(185, 28, 28, 0.55);
+  background: rgba(254, 242, 242, 0.95);
+  color: #991b1b;
+}
+
+.client-res-plan-table-label {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 2px);
+  transform: translateX(-50%);
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.42);
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 16px;
+  color: #334155;
+  white-space: nowrap;
+}
+
+.client-res-plan-photo-btn {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid #d1d5db;
+  background: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.client-res-floor-carousel {
+  margin-top: 6px;
+  margin-bottom: 4px;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.client-res-floor-pill {
+  border: 1px solid #d9deef;
+  background: #ffffff;
+  border-radius: 10px;
+  min-width: 98px;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0 10px;
+  color: #334155;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.client-res-floor-pill.is-active {
+  border-color: #4f46e5;
+  background: #eef2ff;
+  color: #312e81;
+}
+
+.client-res-floor-pill small {
+  font-size: 0.7rem;
+  opacity: 0.78;
+}
+
+.client-res-plan-next-row {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  align-items: center;
+}
+
+.client-res-next-btn {
+  min-width: 176px;
+  border: 0;
+  border-radius: 12px;
+  padding: 0.62rem 1.4rem;
+  background: var(--primary-color);
+  color: #ffffff;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
+}
+
+.client-res-next-btn:hover,
+.client-res-next-btn:focus-visible {
+  background: var(--primary-dark);
+  color: #ffffff;
+}
+
+.client-res-book-btn {
+  border: 0;
+  border-radius: 12px;
+  background: var(--primary-color);
+  color: #ffffff;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.08);
+}
+
+.client-res-book-btn:hover,
+.client-res-book-btn:focus-visible {
+  background: var(--primary-dark);
+  color: #ffffff;
+}
+
+.client-res-summary-card {
+  border: 1px solid #d8deef;
+  background: #f8fafc;
+  border-radius: 12px;
+  padding: 8px 10px;
+}
+
+.client-res-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.88rem;
+  color: #475569;
+}
+
+.client-res-summary-row + .client-res-summary-row {
+  margin-top: 5px;
+}
+
+.client-res-summary-row strong {
+  color: #0f172a;
+  font-weight: 700;
+}
+
+.client-res-summary-row.is-total {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid #d4deef;
+  font-size: 0.94rem;
+}
+
+.client-res-receipt {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.client-res-receipt-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.9rem;
+  color: #475569;
+}
+
+.client-res-receipt-row strong {
+  color: #0f172a;
+  text-align: right;
+}
+
+.client-res-receipt-row.is-total {
+  font-size: 0.97rem;
+}
+
+.client-res-details-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.client-res-selected-card,
+.client-res-form-card {
+  background: rgba(248, 250, 252, 0.85);
+  border-radius: 14px;
+}
+
+.client-res-selected-title {
+  font-size: 1rem;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.client-res-selected-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.client-res-selected-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #d8deed;
+  background: #ffffff;
+  border-radius: 10px;
+  padding: 8px;
+}
+
+.client-res-selected-thumb {
+  width: 74px;
+  height: 48px;
+  border: 1px solid #dde3f2;
+  border-radius: 9px;
+  background: #f8fafc;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.client-res-selected-thumb img {
+  width: 68px;
+  height: 44px;
+  object-fit: contain;
+}
+
+.client-res-selected-name {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.client-res-selected-capacity {
+  font-size: 0.82rem;
+  color: #64748b;
+}
+
+.client-res-readonly-input {
+  background: #eef2f7 !important;
+  border-color: #d3dceb !important;
+  color: #0f172a !important;
+  font-weight: 600;
+}
+
+.client-res-readonly-input[readonly] {
+  cursor: default;
+}
+
+.client-res-tutorial-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+  pointer-events: none;
+}
+
+.client-res-tutorial-mask {
+  position: fixed;
+  background: rgba(2, 6, 23, 0.74);
+  pointer-events: auto;
+}
+
+.client-res-tutorial-focus {
+  position: fixed;
+  border-radius: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0);
+  pointer-events: none;
+}
+
+.client-res-tutorial-card {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: max(12px, calc(env(safe-area-inset-bottom) + 8px));
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 16px 34px rgba(15, 23, 42, 0.34);
+  padding: 10px 12px;
+  pointer-events: auto;
+}
+
+.client-res-tutorial-card.is-top {
+  top: max(74px, calc(env(safe-area-inset-top) + 54px));
+  bottom: auto;
+}
+
+.client-res-tutorial-step {
+  color: #334155;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.client-res-tutorial-text {
+  margin-top: 4px;
+  color: #0f172a;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.client-res-tutorial-skip-btn {
+  margin-top: 7px;
+  border: 0;
+  background: transparent;
+  color: #475569;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  padding: 0;
+}
+
+@media (max-width: 991.98px) {
+  .client-res-map-shell .client-res-plan-stage {
+    height: calc(100dvh - 78px);
+    min-height: 430px;
+  }
+
+  .client-res-controls-overlay {
+    left: 0;
+    right: 0;
+    top: 0;
+  }
+
+  .client-res-controls-title-line {
+    flex-wrap: wrap;
+  }
+
+  .client-res-time-strip {
+    left: 8px;
+    right: 8px;
+    bottom: max(8px, calc(env(safe-area-inset-bottom) + 6px));
+  }
+}
+
+@media (max-width: 767.98px) {
+  .client-reservation-content {
+    max-width: calc(100vw - 8px) !important;
+    padding-inline: 4px;
+  }
+
+  .client-res-details-head,
+  .client-res-plan-next-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .client-res-map-shell .client-res-plan-stage {
+    height: calc(100dvh - 72px);
+    min-height: 380px;
+  }
+
+  .client-res-controls-overlay {
+    top: 6px;
+    left: 6px;
+    right: 6px;
+    padding: 0;
+  }
+
+  .client-res-controls-head {
+    min-height: 38px;
+    padding: 7px 9px 5px;
+  }
+
+  .client-res-controls-stack {
+    grid-template-columns: minmax(0, 1fr) minmax(72px, 0.32fr);
+    gap: 7px;
+    padding: 0 9px 9px;
+  }
+
+  .client-res-overlay-input {
+    min-height: 34px;
+    font-size: 0.88rem;
+  }
+
+  .client-res-map-zoom-slider-wrap {
+    display: none;
+  }
+
+  .client-res-plan-controls {
+    right: 6px;
+    gap: 6px;
+  }
+
+  .client-res-map-control-btn {
+    width: 34px;
+    height: 34px;
+  }
+
+  .client-res-view-switch {
+    top: 96px;
+    left: 8px;
+  }
+
+  .client-res-view-switch button {
+    min-width: 64px;
+    height: 28px;
+    font-size: 0.74rem;
+  }
+
+  .client-res-list-stage {
+    height: calc(100dvh - 72px);
+    min-height: 380px;
+    padding: 78px 8px 112px; /* Reduced top padding since accordion is removed */
+  }
+
+  .client-res-place-card {
+    grid-template-columns: 82px minmax(0, 1fr);
+    border-radius: 16px;
+    padding: 8px;
+  }
+
+  .client-res-place-photo {
+    width: 82px;
+    border-radius: 13px;
+  }
+
+  .client-res-time-ruler {
+    gap: 11px;
+  }
+
+  .client-res-time-strip {
+    padding: 7px 8px;
+    bottom: max(8px, calc(env(safe-area-inset-bottom) + 6px));
+  }
+
+  .client-res-ruler-tick {
+    min-width: 48px;
+  }
+}
+
+.client-bottom-space {
+  height: 74px;
+}
+
+.client-res-scroll-hidden {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.client-res-scroll-hidden::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* Unified client top bar */
+.client-topbar {
+  position: relative;
+  z-index: 1000;
+  background: rgba(248, 250, 252, 0.92);
+  border-bottom: 1px solid rgba(71, 85, 105, 0.16);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.client-topbar.is-sticky {
+  position: sticky;
+  top: 0;
+}
+
+.client-topbar-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 8px;
+}
+
+.client-topbar-side {
+  width: 40px;
+  min-width: 40px;
+  display: flex;
+  align-items: center;
+}
+
+.client-topbar-side--right {
+  justify-content: flex-end;
+}
+
+.client-topbar-spacer {
+  width: 28px;
+  height: 20px;
+}
+
+.client-topbar-back-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  border: 1px solid rgba(71, 85, 105, 0.2);
+  background: rgba(255, 255, 255, 0.85);
+  color: #334155;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+}
+
+.client-topbar-back-btn:hover {
+  background: rgba(255, 255, 255, 0.95);
+}
+
+.client-topbar-brand {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.client-topbar-fallback {
+  font-size: 1.35rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.client-language-toggle {
+  border: 1px solid rgba(71, 85, 105, 0.16);
+  background: rgba(255, 255, 255, 0.75);
+  border-radius: 10px;
+  min-height: 28px;
+  padding: 2px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #334155;
+  cursor: pointer;
+}
+
+.client-language-toggle:hover {
+  background: rgba(255, 255, 255, 0.95);
+}
+
+.client-language-code {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.client-language-flag {
+  width: 20px;
+  height: 14px;
+  object-fit: cover;
+  border-radius: 2px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+.client-account-modal .modal-dialog {
+  margin: 0;
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+}
+
+.client-account-modal .modal-content {
+  border: 0;
+  border-radius: 0;
+  min-height: 100vh;
+  background: #ffffff;
+}
+
+.client-account-modal-header {
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  background: #fff;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: 40px 1fr 40px;
+  align-items: center;
+  gap: 8px;
+}
+
+.client-account-modal-header .modal-title {
+  margin: 0;
+  text-align: center;
+  font-size: 1.05rem;
+  color: #111827;
+}
+
+.client-account-nav-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: none;
+  background: transparent;
+  color: #334155;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.25rem;
+  line-height: 1;
+  padding: 0;
+}
+
+.client-account-header-spacer {
+  width: 36px;
+  height: 36px;
+}
+
+.client-account-modal-body {
+  padding: 12px 14px 14px;
+  background: #fff;
+  overflow-y: auto;
+  display: flex;
+}
+
+.client-account-menu,
+.client-account-screen {
+  width: min(760px, 100%);
+  margin: 0 auto;
+  min-height: 100%;
+  flex: 1;
+}
+
+.client-account-menu {
+  display: flex;
+  flex-direction: column;
+}
+
+.client-account-menu-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.client-account-menu-item {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 0;
+  background: transparent;
+  padding: 12px 2px;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  transition: background-color 0.18s ease;
+}
+
+.client-account-menu-item:hover {
+  background: rgba(15, 23, 42, 0.03);
+}
+
+.client-account-menu-item-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(37, 99, 235, 0.12);
+  color: #1d4ed8;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.client-account-menu-item-title {
+  font-size: 1.02rem;
+  font-weight: 700;
+  color: #111827;
+  flex: 1;
+}
+
+.client-account-menu-item-arrow {
+  margin-left: auto;
+  color: #64748b;
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.client-account-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.86rem;
+  color: #475569;
+  margin-bottom: 8px;
+}
+
+.client-account-language-outside {
+  margin-top: 14px;
+}
+
+.client-account-language-outside-title {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.client-account-section {
+  border: 1px solid rgba(71, 85, 105, 0.16);
+  border-radius: 14px;
+  padding: 12px;
+  background: #fff;
+  margin-bottom: 10px;
+}
+
+.client-account-section-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin: 0 0 10px;
+  color: #1f2937;
+}
+
+.client-account-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.client-account-profile-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.client-account-field {
+  border: 1px solid rgba(71, 85, 105, 0.12);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(248, 250, 252, 0.8);
+}
+
+.client-account-field span {
+  display: block;
+  font-size: 0.75rem;
+  color: #64748b;
+  margin-bottom: 2px;
+}
+
+.client-account-field strong {
+  display: block;
+  font-size: 0.9rem;
+  color: #111827;
+  word-break: break-word;
+}
+
+.client-account-language-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.client-account-language-grid-compact .client-account-language-btn {
+  min-height: 44px;
+  border-radius: 10px;
+  font-size: 0.86rem;
+}
+
+.client-account-language-btn {
+  min-height: 52px;
+  border-radius: 12px;
+  border: 1px solid rgba(71, 85, 105, 0.18);
+  background: #fff;
+  padding: 6px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: #334155;
+  font-size: 0.9rem;
+  transition: all 0.2s ease;
+}
+
+.client-account-language-btn:hover {
+  border-color: rgba(71, 85, 105, 0.32);
+  background: #f8fafc;
+}
+
+.client-account-language-btn.is-active {
+  border-color: var(--primary-color);
+  background: rgba(59, 130, 246, 0.1);
+  color: #1e3a8a;
+  font-weight: 700;
+}
+
+.client-account-language-btn img {
+  width: 22px;
+  height: 16px;
+  object-fit: cover;
+  border-radius: 2px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.2);
+}
+
+.client-account-operator-footer {
+  margin-top: auto;
+  padding-top: 14px;
+  font-size: 0.76rem;
+  color: #64748b;
+  line-height: 1.45;
+}
+
+.client-account-operator-title {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+  color: #94a3b8;
+}
+
+.client-account-operator-footer strong {
+  color: #334155;
+  font-weight: 600;
+}
+
+.client-account-operator-error {
+  margin-top: 3px;
+  color: #b45309;
+}
+
+.client-account-empty {
+  font-size: 0.88rem;
+  color: #64748b;
+  border: 1px dashed rgba(71, 85, 105, 0.24);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(248, 250, 252, 0.75);
+}
+
+.client-account-order-list,
+.client-account-feedback-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.client-account-order-card {
+  border: 1px solid rgba(71, 85, 105, 0.14);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.client-account-order-trigger {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 10px 10px 8px;
+  text-align: left;
+}
+
+.client-account-order-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.client-account-order-number {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.client-account-order-date {
+  font-size: 0.75rem;
+  color: #64748b;
+}
+
+.client-account-order-total {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #1d4ed8;
+  margin-bottom: 3px;
+}
+
+.client-account-order-toggle {
+  margin-top: 6px;
+  font-size: 0.75rem;
+  color: #64748b;
+}
+
+.client-account-order-details {
+  border-top: 1px solid rgba(71, 85, 105, 0.14);
+  background: rgba(248, 250, 252, 0.65);
+  padding: 9px 10px;
+}
+
+.client-account-order-label {
+  font-size: 0.75rem;
+  color: #64748b;
+  margin-bottom: 6px;
+}
+
+.client-account-order-item {
+  border-bottom: 1px dashed rgba(148, 163, 184, 0.4);
+  padding: 5px 0;
+}
+
+.client-account-order-item:last-child {
+  border-bottom: none;
+}
+
+.client-account-order-item-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.83rem;
+  color: #1f2937;
+}
+
+.client-account-order-item-extra {
+  margin-top: 2px;
+  font-size: 0.75rem;
+  color: #64748b;
+}
+
+.client-account-order-meta {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.77rem;
+  color: #475569;
+}
+
+.client-account-feedback-form {
+  border: 1px solid rgba(71, 85, 105, 0.14);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(248, 250, 252, 0.65);
+  margin-bottom: 10px;
+}
+
+.client-account-feedback-card {
+  border: 1px solid rgba(71, 85, 105, 0.14);
+  border-radius: 12px;
+  padding: 10px;
+  background: #fff;
+}
+
+.client-account-feedback-message {
+  white-space: pre-wrap;
+  color: #1f2937;
+  font-size: 0.86rem;
+}
+
+.client-account-feedback-date {
+  margin-top: 5px;
+  font-size: 0.75rem;
+  color: #64748b;
+}
+
+.client-account-feedback-response {
+  margin-top: 7px;
+  border-radius: 9px;
+  border: 1px solid rgba(71, 85, 105, 0.14);
+  background: rgba(248, 250, 252, 0.75);
+  padding: 7px 8px;
+  font-size: 0.82rem;
+  color: #334155;
+}
+
+.client-account-feedback-response small {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 0.74rem;
+  color: #64748b;
+}
+
+@media (max-width: 420px) {
+  .client-account-language-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .client-account-modal-header {
+    padding-top: max(12px, env(safe-area-inset-top));
+  }
+}
+
+/* Bottom nav */
+.client-bottom-nav {
+  position: fixed;
+  bottom: 10px;
+  left: 10px;
+  right: 10px;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(71, 85, 105, 0.18);
+  border-radius: 20px;
+  padding: 8px 6px 10px;
+  box-shadow: 0 14px 34px rgba(52, 36, 18, 0.14);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  transition: padding 0.24s ease, border-radius 0.24s ease, box-shadow 0.24s ease;
+}
+
+.client-bottom-nav.is-ios {
+  bottom: max(10px, env(safe-area-inset-bottom));
+  left: 12px;
+  right: 12px;
+  border-radius: 28px;
+  padding: 10px 8px 12px;
+}
+
+.client-bottom-nav.is-desktop {
+  left: 50%;
+  right: auto;
+  width: min(920px, calc(100vw - 24px));
+  transform: translateX(-50%);
+}
+
+.client-bottom-nav.is-compact {
+  cursor: pointer;
+  border-radius: 16px;
+  padding: 6px;
+}
+
+.client-bottom-nav.is-liquid-glass {
+  --client-nav-glass-opacity-safe: var(--client-nav-glass-opacity, 0.34);
+  --client-nav-glass-blur-safe: var(--client-nav-glass-blur, 16px);
+  background: rgba(255, 255, 255, var(--client-nav-glass-opacity-safe));
+  border-color: rgba(148, 163, 184, 0.36);
+  box-shadow: 0 18px 32px rgba(51, 65, 85, 0.18);
+  backdrop-filter: blur(var(--client-nav-glass-blur-safe)) saturate(1.25);
+  -webkit-backdrop-filter: blur(var(--client-nav-glass-blur-safe)) saturate(1.25);
+}
+
+.client-bottom-nav.is-liquid-glass .client-bottom-nav-item.is-active {
+  background: rgba(255, 255, 255, 0.28);
+  border-color: rgba(148, 163, 184, 0.34);
+}
+
+.client-bottom-nav.is-height-locked {
+  padding: 8px 6px 10px;
+  border-radius: 20px;
+}
+
+.client-bottom-nav.is-height-locked.is-ios {
+  padding: 10px 8px 12px;
+  border-radius: 28px;
+}
+
+.client-bottom-nav.is-height-locked .client-bottom-nav-item {
+  min-height: 52px;
+}
+
+.client-bottom-nav.is-ios.is-compact {
+  border-radius: 20px;
+  padding: 7px 8px;
+}
+
+.client-bottom-nav.is-height-locked.is-compact {
+  border-radius: 20px;
+  padding: 8px 6px 10px;
+}
+
+.client-bottom-nav.is-height-locked.is-ios.is-compact {
+  border-radius: 28px;
+  padding: 10px 8px 12px;
+}
+
+.client-bottom-nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  min-width: 70px;
+  border-radius: 14px;
+  border: 1px solid transparent;
+  background: transparent;
+  padding: 6px 14px;
+  opacity: 0.72;
+  transform: translateY(0);
+  transition: all 0.24s ease;
+  cursor: pointer;
+}
+
+.client-bottom-nav.is-ios .client-bottom-nav-item {
+  border-radius: 18px;
+}
+
+.client-bottom-nav-item.is-active {
+  opacity: 1;
+  background: rgba(71, 85, 105, 0.08);
+  border-color: rgba(71, 85, 105, 0.16);
+  transform: translateY(-1px);
+}
+
+.client-bottom-nav-item.is-compact {
+  min-width: 50px;
+  padding: 5px 10px;
+}
+
+.client-bottom-nav-icon {
+  font-size: 22px;
+  line-height: 1;
+  margin-bottom: 2px;
+  filter: grayscale(0.1);
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.client-bottom-nav-icon-image {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+  display: block;
+}
+
+.client-bottom-nav-item.is-active .client-bottom-nav-icon {
+  filter: none;
+}
+
+.client-bottom-nav-item.is-compact .client-bottom-nav-icon {
+  font-size: 18px;
+  margin-bottom: 0;
+}
+
+.client-bottom-nav-item.is-compact .client-bottom-nav-icon-image {
+  width: 18px;
+  height: 18px;
+}
+
+.client-bottom-nav-label {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  margin-top: 1px;
+  max-height: 16px;
+  opacity: 1;
+  overflow: hidden;
+  transform: translateY(0);
+  transition: max-height 0.22s ease, opacity 0.18s ease, transform 0.22s ease, margin-top 0.22s ease;
+}
+
+.client-bottom-nav-item.is-active .client-bottom-nav-label {
+  font-weight: 600;
+  color: var(--primary-color);
+}
+
+.client-bottom-nav-item.is-compact .client-bottom-nav-label {
+  max-height: 0;
+  opacity: 0;
+  margin-top: 0;
+  transform: translateY(-4px);
+}
+
+.client-bottom-nav-badge {
+  position: absolute;
+  top: 0;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  padding: 0 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #64748b, #475569);
+  transition: all 0.24s ease;
+}
+
+.client-bottom-nav-item.is-compact .client-bottom-nav-badge {
+  top: -2px;
+  right: 2px;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  padding: 0 3px;
+  font-size: 9px;
+}
+
+:root[data-ui-theme="modern"] .client-topbar {
+  background: rgba(240, 253, 250, 0.9);
+  border-bottom-color: rgba(15, 118, 110, 0.22);
+}
+
+:root[data-ui-theme="modern"] .client-bottom-nav {
+  border-color: rgba(15, 118, 110, 0.24);
+  box-shadow: 0 14px 30px rgba(15, 118, 110, 0.16);
+}
+body:has(.service-lock-overlay) {
+  overflow: hidden;
+}
+
+body:has(.service-lock-overlay) #root > *:not(.service-lock-overlay) {
+  pointer-events: none !important;
+  user-select: none !important;
+}
+
+.service-lock-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 999999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(10, 14, 26, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.service-lock-modal {
+  width: min(540px, 100%);
+  border-radius: 14px;
+  padding: 22px;
+  color: #f8fafc;
+  background: #111827;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  box-shadow: 0 24px 70px rgba(2, 6, 23, 0.55);
+  text-align: center;
+}
+
+.service-lock-badge {
+  display: inline-block;
+  padding: 6px 10px;
+  border-radius: 999px;
+  margin-bottom: 12px;
+  color: #fecaca;
+  background: rgba(239, 68, 68, 0.18);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.service-lock-modal h2 {
+  margin: 0 0 10px;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.service-lock-modal p {
+  margin: 0;
+  color: #dbeafe;
+  line-height: 1.55;
+}
+
+.service-lock-phone {
+  margin-top: 14px;
+  color: #fde68a;
+  font-weight: 800;
+}
+
+/* Кнопка и ссылки меню «Каталог» (веб-витрина) */
+.client-catalog-menu-btn { transition: filter 0.18s ease, transform 0.18s ease; }
+.client-catalog-menu-btn:hover { filter: brightness(0.94); }
+.client-catalog-menu-btn:active { transform: translateY(1px); }
+.client-catalog-menu-link { transition: color 0.15s ease; }
+.client-catalog-menu-link:hover { color: var(--primary-color, #2563eb) !important; }
+
+/* Модалка меню «Каталог» (drill-down по категориям) */
+.client-catalog-menu-dialog { max-width: 520px; }
+.client-catalog-menu-row { transition: border-color 0.15s ease, background 0.15s ease; }
+.client-catalog-menu-row:hover { border-color: var(--primary-color, #2563eb) !important; background: rgba(148, 163, 184, 0.08) !important; }
+
+/* Левая панель меню «Каталог» — подсветка пункта при наведении */
+.client-catalog-l1-item { transition: background 0.12s ease, color 0.12s ease; }
+.client-catalog-l1-item:hover { background: #ffffff !important; color: var(--primary-color, #2563eb) !important; }

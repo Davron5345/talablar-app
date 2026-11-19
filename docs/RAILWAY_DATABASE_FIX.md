@@ -1,0 +1,85 @@
+# 🔧 Исправление проблемы с DATABASE_URL
+
+## Проблема
+Ошибка: `ECONNREFUSED ::1:5432` - приложение не может подключиться к PostgreSQL
+
+## Решение
+
+### Шаг 1: Проверьте подключение PostgreSQL к сервису
+
+В Railway:
+1. Откройте ваш проект
+2. Убедитесь, что сервис "Postgres" виден на архитектуре
+3. **ВАЖНО:** PostgreSQL должен быть подключен к сервису "tandoorapp"
+
+### Шаг 2: Проверьте переменную DATABASE_URL
+
+1. В Railway откройте сервис **"tandoorapp"** (не Postgres!)
+2. Перейдите на вкладку **"Variables"**
+3. Проверьте, есть ли переменная `DATABASE_URL`
+4. Если её нет - Railway не подключил PostgreSQL автоматически
+
+### Шаг 3: Подключите PostgreSQL вручную (если нужно)
+
+**Вариант A: Через Railway UI**
+1. В проекте Railway нажмите на сервис **"Postgres"**
+2. Перейдите на вкладку **"Settings"**
+3. Найдите раздел **"Connect"** или **"Service Connections"**
+4. Убедитесь, что сервис "tandoorapp" подключен
+
+**Вариант B: Через переменные**
+1. В сервисе **"Postgres"** найдите переменную `DATABASE_URL` или `POSTGRES_URL`
+2. Скопируйте значение
+3. В сервисе **"tandoorapp"** → Variables → Add Variable
+4. Имя: `DATABASE_URL`
+5. Значение: вставьте скопированный URL
+
+### Шаг 4: Проверьте формат DATABASE_URL
+
+DATABASE_URL должен выглядеть примерно так:
+```
+postgresql://postgres:password@hostname:5432/postgres
+```
+
+Или:
+```
+postgres://postgres:password@hostname:5432/postgres
+```
+
+### Шаг 5: Перезапустите сервис
+
+После добавления DATABASE_URL:
+1. Railway автоматически перезапустит сервис
+2. Или вручную: Deployments → три точки → "Restart"
+
+### Шаг 6: Проверьте логи
+
+После перезапуска в логах должно быть:
+```
+✅ Connected to PostgreSQL database
+🔄 Starting database migration...
+✅ Database schema created
+✅ Default admin user created: Davron / 993025345
+✅ Migration completed successfully
+```
+
+## Альтернативное решение: Использовать Railway Service Connection
+
+1. В Railway откройте сервис **"tandoorapp"**
+2. Перейдите на вкладку **"Settings"**
+3. Найдите раздел **"Service Connections"** или **"Connected Services"**
+4. Нажмите **"Connect Service"** или **"Add Connection"**
+5. Выберите сервис **"Postgres"**
+6. Railway автоматически добавит `DATABASE_URL`
+
+## Проверка
+
+После исправления откройте:
+- https://tandoorapp-production.up.railway.app/login
+- Войдите: `Davron` / `993025345`
+
+Должна открыться админ-панель!
+
+
+
+

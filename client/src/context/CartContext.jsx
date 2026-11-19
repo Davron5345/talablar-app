@@ -1,0 +1,296 @@
+import React, { createContext, useState, useContext, useEffect } from 'react';
+import { useAuth } from './AuthContext';
+
+const CartContext = createContext();
+const CART_STORAGE_KEY = 'cart';
+const QUANTITY_SCALE = 100;
+
+function parseRestaurantId(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function getActiveRestaurantId() {
+  try {
+    return parseRestaurantId(localStorage.getItem('active_restaurant_id'));
+  } catch {
+    return null;
+  }
+}
+
+function normalizeCartItem(item) {
+  const unit = String(item?.unit || '').trim();
+  const selectedVariant = String(item?.selected_variant || '').trim();
+  return {
+    ...item,
+    id: Number(item?.id),
+    quantity: normalizeQuantity(item?.quantity, 1),
+    order_step: normalizeOrderStep(item?.order_step, unit),
+    restaurant_id: parseRestaurantId(item?.restaurant_id),
+    selected_variant: selectedVariant || null
+  };
+}
+
+function normalizeVariantKey(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function isSameProductInRestaurant(item, productId, restaurantId, selectedVariant = null) {
+  return (
+    Number(item?.id) === Number(productId)
+    && parseRestaurantId(item?.restaurant_id) === restaurantId
+    && normalizeVariantKey(item?.selected_variant) === normalizeVariantKey(selectedVariant)
+  );
+}
+
+function filterCartByRestaurant(allItems, restaurantId) {
+  if (!restaurantId) return [];
+  return allItems.filter((item) => parseRestaurantId(item?.restaurant_id) === restaurantId);
+}
+
+function parsePriceValue(value) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  if (typeof value !== 'string') {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  const trimmed = value.replace(/\u00A0/g, ' ').trim();
+  if (!trimmed) return 0;
+
+  // Handle values like "120 999 98" from old broken formatter -> "120999.98"
+  const parts = trimmed.split(/\s+/).filter(Boolean);
+  if (!trimmed.includes(',') && parts.length >= 2 && /^\d+$/.test(parts[parts.length - 1]) && parts[parts.length - 1].length === 2) {
+    const normalized = `${parts.slice(0, -1).join('')}.${parts[parts.length - 1]}`;
+    const parsedLegacy = Number.parseFloat(normalized);
+    if (Number.isFinite(parsedLegacy)) return parsedLegacy;
+  }
+
+  const normalized = trimmed.replace(/\s+/g, '').replace(',', '.');
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeQuantity(value, fallback = 1) {
+  const parsed = parsePriceValue(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.round((parsed + Number.EPSILON) * QUANTITY_SCALE) / QUANTITY_SCALE;
+}
+
+// Units that support a fractional order step (weight / volume / length).
+const ORDER_STEP_UNITS = ['кг', 'г', 'л', 'мл', 'м', 'км'];
+
+function normalizeOrderStep(value, unit) {
+  if (!ORDER_STEP_UNITS.includes(String(unit || '').trim())) return null;
+  const parsed = normalizeQuantity(value, 0);
+  return parsed > 0 ? parsed : null;
+}
+
+export function resolveQuantityStep(item) {
+  return normalizeOrderStep(item?.order_step, item?.unit) || 1;
+}
+
+function normalizeContainerNorm(value, fallback = 1) {
+  const parsed = parsePriceValue(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+function resolveContainerUnits(quantityValue, normValue) {
+  const quantity = Number(quantityValue);
+  if (!Number.isFinite(quantity) || quantity <= 0) return 0;
+  const norm = normalizeContainerNorm(normValue, 1);
+  return Math.ceil(quantity / norm);
+}
+
+// Helper to format price with grouping and correct decimal separator
+export function formatPrice(price) {
+  const numeric = parsePriceValue(price);
+  const rounded = Math.round((numeric + Number.EPSILON) * 100) / 100;
+  const hasFraction = Math.abs(rounded % 1) > 0.0000001;
+
+  return rounded
+    .toLocaleString('ru-RU', {
+      minimumFractionDigits: hasFraction ? 2 : 0,
+      maximumFractionDigits: 2
+    })
+    .replace(/\u00A0/g, ' ');
+}
+
+export function formatQuantity(quantity) {
+  const numeric = normalizeQuantity(quantity, 0);
+  const rounded = Math.round((numeric + Number.EPSILON) * QUANTITY_SCALE) / QUANTITY_SCALE;
+  const hasFraction = Math.abs(rounded % 1) > 0.0000001;
+
+  return rounded
+    .toLocaleString('ru-RU', {
+      minimumFractionDigits: hasFraction ? 1 : 0,
+      maximumFractionDigits: 2
+    })
+    .replace(/\u00A0/g, ' ');
+}
+
+export function CartProvider({ children }) {
+  const { user } = useAuth();
+  // Публичная витрина (/<slug>) выставляет override, чтобы корзина
+  // фильтровалась по магазину из URL, а не по active_restaurant_id сессии.
+  const [overrideRestaurantId, setOverrideRestaurantId] = useState(null);
+  // Initialize cart from localStorage
+  const [allCartItems, setAllCartItems] = useState(() => {
+    try {
+      const saved = localStorage.getItem(CART_STORAGE_KEY);
+      const parsed = saved ? JSON.parse(saved) : [];
+      return Array.isArray(parsed) ? parsed.map(normalizeCartItem) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Save cart to localStorage whenever it changes
+  useEffect(() => {
+    localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(allCartItems));
+  }, [allCartItems]);
+
+  const activeRestaurantId = parseRestaurantId(overrideRestaurantId)
+    || parseRestaurantId(user?.active_restaurant_id)
+    || getActiveRestaurantId();
+  const cart = filterCartByRestaurant(allCartItems, activeRestaurantId);
+
+  const addToCart = (product, quantityToAdd) => {
+    const productUnit = String(product?.unit || '').trim();
+    const productOrderStep = normalizeOrderStep(product?.order_step, productUnit);
+    const requestedQty = quantityToAdd === undefined || quantityToAdd === null
+      ? (productOrderStep || 1)
+      : quantityToAdd;
+    const safeQty = normalizeQuantity(requestedQty, productOrderStep || 1);
+    const productRestaurantId = parseRestaurantId(product?.restaurant_id) || activeRestaurantId;
+    const selectedVariant = String(product?.selected_variant || '').trim() || null;
+    setAllCartItems((prevCart) => {
+      const existingItem = prevCart.find((item) => isSameProductInRestaurant(item, product.id, productRestaurantId, selectedVariant));
+      
+      if (existingItem) {
+        const nextQuantity = normalizeQuantity(existingItem.quantity + safeQty, safeQty);
+        const nextContainerNorm = normalizeContainerNorm(
+          product?.container_norm ?? existingItem?.container_norm,
+          1
+        );
+        const nextContainerPrice = parsePriceValue(
+          product?.container_price ?? existingItem?.container_price
+        );
+        const nextContainerName = String(
+          product?.container_name ?? existingItem?.container_name ?? ''
+        ).trim() || null;
+        return prevCart.map((item) =>
+          isSameProductInRestaurant(item, product.id, productRestaurantId, selectedVariant)
+            ? normalizeCartItem({
+              ...item,
+              ...product,
+              restaurant_id: productRestaurantId,
+              order_step: productOrderStep,
+              selected_variant: selectedVariant,
+              quantity: nextQuantity,
+              container_name: nextContainerName,
+              container_price: nextContainerPrice,
+              container_norm: nextContainerNorm
+            })
+            : item
+        );
+      }
+      
+      return [...prevCart, normalizeCartItem({
+        ...product,
+        restaurant_id: productRestaurantId,
+        selected_variant: selectedVariant,
+        quantity: safeQty,
+        order_step: productOrderStep
+      })];
+    });
+  };
+
+  const updateQuantity = (productId, quantity, selectedVariant = null) => {
+    const normalizedQty = normalizeQuantity(quantity, 0);
+    if (normalizedQty <= 0) {
+      removeFromCart(productId, selectedVariant);
+      return;
+    }
+    if (!activeRestaurantId) return;
+    
+    setAllCartItems((prevCart) =>
+      prevCart.map((item) =>
+        isSameProductInRestaurant(item, productId, activeRestaurantId, selectedVariant)
+          ? { ...item, quantity: normalizedQty }
+          : item
+      )
+    );
+  };
+
+  const removeFromCart = (productId, selectedVariant = null) => {
+    if (!activeRestaurantId) return;
+    setAllCartItems((prevCart) => prevCart.filter((item) => {
+      const inActiveRestaurant = isSameProductInRestaurant(item, productId, activeRestaurantId, selectedVariant);
+      return !inActiveRestaurant;
+    }));
+  };
+
+  const clearCart = () => {
+    if (!activeRestaurantId) return;
+    setAllCartItems((prevCart) => prevCart.filter((item) => parseRestaurantId(item?.restaurant_id) !== activeRestaurantId));
+  };
+
+  const cartCount = normalizeQuantity(cart.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0), 0);
+  
+  // Calculate cart total including container prices
+  const cartTotal = cart.reduce((sum, item) => {
+    const quantity = normalizeQuantity(item.quantity, 0);
+    const productPrice = parsePriceValue(item.price);
+    const productTotal = productPrice * quantity;
+    const containerUnits = resolveContainerUnits(item.quantity, item.container_norm);
+    const containerPrice = parsePriceValue(item.container_price);
+    const containerTotal = containerPrice > 0 ? (containerPrice * containerUnits) : 0;
+    return sum + productTotal + containerTotal;
+  }, 0);
+  
+  // Calculate container total separately for display
+  const containerTotal = cart.reduce((sum, item) => {
+    const containerUnits = resolveContainerUnits(item.quantity, item.container_norm);
+    const containerPrice = parsePriceValue(item.container_price);
+    return sum + (containerPrice > 0 ? (containerPrice * containerUnits) : 0);
+  }, 0);
+  
+  // Calculate product total without containers
+  const productTotal = cart.reduce((sum, item) => {
+    const quantity = normalizeQuantity(item.quantity, 0);
+    const productPrice = parsePriceValue(item.price);
+    return sum + (productPrice * quantity);
+  }, 0);
+
+  return (
+    <CartContext.Provider
+      value={{
+        cart,
+        cartCount,
+        cartTotal,
+        productTotal,
+        containerTotal,
+        addToCart,
+        updateQuantity,
+        removeFromCart,
+        clearCart,
+        setOverrideRestaurantId
+      }}
+    >
+      {children}
+    </CartContext.Provider>
+  );
+}
+
+export function useCart() {
+  return useContext(CartContext);
+}
+
+
+
+

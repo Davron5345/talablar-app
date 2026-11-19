@@ -1,0 +1,35 @@
+const { Pool } = require('pg');
+require('dotenv').config();
+
+// Check if DATABASE_URL is set
+if (!process.env.DATABASE_URL) {
+  console.error('❌ DATABASE_URL is not set!');
+  console.error('Please set DATABASE_URL in Railway variables or .env file');
+}
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: false,
+  connectionTimeoutMillis: 10000, // Увеличим до 10 секунд
+  idleTimeoutMillis: 30000,
+});
+
+pool.on('connect', (client) => {
+  console.log('✅ Connected to PostgreSQL database');
+  client.query(`
+    SET idle_in_transaction_session_timeout = '60s';
+    SET lock_timeout = '10s';
+  `).catch((err) => {
+    console.warn('⚠️ Failed to apply PostgreSQL session timeouts:', err.message);
+  });
+});
+
+pool.on('error', (err) => {
+  console.error('❌ Database connection error details:', {
+    message: err.message,
+    stack: err.stack,
+    code: err.code
+  });
+});
+
+module.exports = pool;

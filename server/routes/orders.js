@@ -1,0 +1,1367 @@
+const express = require('express');
+const pool = require('../database/connection');
+const axios = require('axios');
+const { authenticate } = require('../middleware/auth');
+const {
+  sendOrderNotification,
+  sendOrderUpdateToUser,
+  updateOrderNotificationForCustomerCancel,
+  sendCardReceiptPlaceholderToGroup,
+  getRestaurantBot
+} = require('../bot/notifications');
+const printerManager = require('../services/printerManager');
+const { isPaymeConfigured } = require('../services/payme');
+const { applyPromoForOrder, validatePromo } = require('../services/promoCodes');
+const {
+  ensureInventorySchema,
+  isInventoryTrackingEnabled,
+  reserveInventoryForOrder,
+  releaseInventoryForOrder
+} = require('../services/inventoryManager');
+const jwt = require('jsonwebtoken');
+
+const router = express.Router();
+const isEnabledFlag = (value) => value === true || value === 'true' || value === 1 || value === '1';
+const normalizeOrderStatus = (status) => status === 'in_progress' ? 'preparing' : status;
+const escapeHtml = (value) => String(value ?? '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;');
+const normalizeContainerNorm = (value, fallback = 1) => {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+};
+const toNumeric = (value, fallback = 0) => {
+  if (value === null || value === undefined || value === '') return fallback;
+  const normalized = String(value).replace(/\s+/g, '').replace(',', '.');
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+const normalizeFulfillmentType = (value, fallback = 'delivery') => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'pickup' ? 'pickup' : fallback;
+};
+const normalizeSelectedVariant = (value) => {
+  if (value === undefined || value === null) return null;
+  const normalized = String(value).trim().slice(0, 120);
+  return normalized || null;
+};
+const toOptionalTrimmedText = (value) => (
+  value === undefined || value === null ? '' : String(value).trim()
+);
+const normalizeProductImages = (value) => {
+  let source = value;
+  if (typeof source === 'string') {
+    try {
+      source = JSON.parse(source);
+    } catch {
+      source = [];
+    }
+  }
+  if (!Array.isArray(source)) return [];
+
+  return source
+    .map((entry) => {
+      if (typeof entry === 'string') {
+        const url = toOptionalTrimmedText(entry);
+        return url ? { url, thumb_url: '' } : null;
+      }
+      if (!entry || typeof entry !== 'object') return null;
+      const url = toOptionalTrimmedText(entry.url || entry.image_url);
+      const thumbUrl = toOptionalTrimmedText(entry.thumb_url || entry.thumbUrl);
+      if (!url && !thumbUrl) return null;
+      return { url, thumb_url: thumbUrl };
+    })
+    .filter(Boolean);
+};
+const normalizeSizeOptions = (value) => {
+  let source = value;
+  if (typeof source === 'string') {
+    try {
+      source = JSON.parse(source);
+    } catch {
+      source = [];
+    }
+  }
+  return Array.isArray(source) ? source : [];
+};
+const resolveItemImageFromProduct = (item = {}) => {
+  const selectedVariant = normalizeSelectedVariant(item.selected_variant);
+  const sizeOptions = normalizeSizeOptions(item.size_options);
+  const matchingVariant = sizeOptions.find((option) => (
+    normalizeSelectedVariant(option?.name) === selectedVariant
+  ));
+  const variantImages = normalizeProductImages(matchingVariant?.product_images);
+  const productImages = normalizeProductImages(item.product_images);
+
+  return (
+    variantImages.find((entry) => entry.thumb_url)?.thumb_url
+    || toOptionalTrimmedText(matchingVariant?.thumb_url || matchingVariant?.thumbUrl)
+    || variantImages[0]?.url
+    || toOptionalTrimmedText(matchingVariant?.image_url || matchingVariant?.imageUrl)
+    || toOptionalTrimmedText(item.thumb_url || item.thumbUrl)
+    || productImages.find((entry) => entry.thumb_url)?.thumb_url
+    || productImages[0]?.url
+    || toOptionalTrimmedText(item.image_url || item.imageUrl)
+    || ''
+  );
+};
+const resolveContainerUnits = (quantityValue, normValue) => {
+  const quantity = Number.parseFloat(quantityValue);
+  if (!Number.isFinite(quantity) || quantity <= 0) return 0;
+  const normalizedNorm = normalizeContainerNorm(normValue, 1);
+  return Math.ceil(quantity / normalizedNorm);
+};
+
+function getNowInRestaurantTimezone() {
+  const timezone = process.env.RESTAURANT_TIMEZONE || 'Asia/Tashkent';
+  const nowString = new Date().toLocaleString('en-US', { timeZone: timezone });
+  return new Date(nowString);
+}
+
+function isPointInPolygon(point, polygon) {
+  const [x, y] = point;
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i][0];
+    const yi = polygon[i][1];
+    const xj = polygon[j][0];
+    const yj = polygon[j][1];
+
+    const intersect = ((yi > y) !== (yj > y))
+      && (x < ((xj - xi) * (y - yi)) / ((yj - yi) || 1e-7) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function isInDeliveryZone(deliveryZone, lat, lng) {
+  if (!deliveryZone) return true;
+
+  let zone = deliveryZone;
+  if (typeof zone === 'string') {
+    try {
+      zone = JSON.parse(zone);
+    } catch {
+      return true;
+    }
+  }
+
+  if (!Array.isArray(zone) || zone.length < 3) return true;
+  return isPointInPolygon([lat, lng], zone);
+}
+
+const DEFAULT_DELIVERY_BASE_RADIUS_KM = 2;
+const DEFAULT_DELIVERY_BASE_PRICE = 5000;
+const DEFAULT_DELIVERY_PRICE_PER_KM = 2000;
+const DEFAULT_DELIVERY_FIXED_PRICE = 0;
+const normalizeDeliveryPricingMode = (value, fallback = 'dynamic') => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'fixed' || normalized === 'dynamic') return normalized;
+  const normalizedFallback = String(fallback || '').trim().toLowerCase();
+  return normalizedFallback === 'fixed' ? 'fixed' : 'dynamic';
+};
+
+async function getRoadDistanceKm(fromLat, fromLng, toLat, toLng) {
+  try {
+    const url = `http://router.project-osrm.org/route/v1/driving/${fromLng},${fromLat};${toLng},${toLat}?overview=false`;
+    const response = await axios.get(url, { timeout: 10000 });
+    if (response.data?.code === 'Ok' && Array.isArray(response.data?.routes) && response.data.routes.length > 0) {
+      return Number(response.data.routes[0]?.distance || 0) / 1000;
+    }
+  } catch (error) {
+    console.warn('⚠️ Delivery road distance error:', error?.message || error);
+  }
+  return null;
+}
+
+function getHaversineDistanceKm(lat1, lon1, lat2, lon2) {
+  const earthRadiusKm = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusKm * c;
+}
+
+// Public temporary order preview for Telegram operator links
+router.get('/operator-preview', async (req, res) => {
+  try {
+    const token = req.query.token;
+    if (!token) {
+      return res.status(400).send('Missing token');
+    }
+
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).send('JWT secret is not configured');
+    }
+
+    let payload;
+    try {
+      payload = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (e) {
+      return res.status(401).send('Invalid or expired token');
+    }
+
+    if (!payload || payload.type !== 'order_preview' || !payload.orderId) {
+      return res.status(401).send('Invalid token payload');
+    }
+
+    const orderResult = await pool.query(`
+      SELECT o.*, r.name AS restaurant_name
+      FROM orders o
+      LEFT JOIN restaurants r ON r.id = o.restaurant_id
+      WHERE o.id = $1
+      LIMIT 1
+    `, [payload.orderId]);
+
+    if (orderResult.rows.length === 0) {
+      return res.status(404).send('Order not found');
+    }
+
+    const itemsResult = await pool.query(`
+      SELECT oi.*, p.image_url, p.thumb_url, p.product_images, p.size_options
+      FROM order_items oi
+      LEFT JOIN products p ON p.id = oi.product_id
+      WHERE oi.order_id = $1
+      ORDER BY oi.id
+    `, [payload.orderId]);
+
+    const order = orderResult.rows[0];
+    if (String(order.status || '').toLowerCase() === 'cancelled') {
+      return res.status(410).send('Order cancelled');
+    }
+
+    const items = itemsResult.rows;
+    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    const baseUrl = `${proto}://${host}`;
+    const fmt = (v) => Number.parseFloat(v || 0).toLocaleString('ru-RU');
+
+    const itemsHtml = items.map((item, index) => {
+      const resolvedImagePath = resolveItemImageFromProduct(item);
+      const img = resolvedImagePath
+        ? (String(resolvedImagePath).startsWith('http') ? String(resolvedImagePath) : `${baseUrl}${String(resolvedImagePath).startsWith('/') ? '' : '/'}${String(resolvedImagePath)}`)
+        : '';
+      const lineTotal = (Number(item.quantity) || 0) * (Number(item.price) || 0);
+      return `
+        <div class="item">
+          <div class="item-index">${index + 1}.</div>
+          <div class="thumb-wrap">${img ? `<img class="thumb" src="${escapeHtml(img)}" alt="">` : '<div class="thumb ph">🍽️</div>'}</div>
+          <div class="meta">
+            <div class="name">${escapeHtml(item.product_name)}</div>
+            <div class="sub">${escapeHtml(item.quantity)} x ${fmt(item.price)} сум</div>
+          </div>
+          <div class="sum">${fmt(lineTotal)} сум</div>
+        </div>
+      `;
+    }).join('');
+
+    const html = `
+      <!doctype html>
+      <html lang="ru">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Заказ #${escapeHtml(order.order_number)}</title>
+        <style>
+          body{margin:0;padding:16px;background:#f7f1e8;color:#3d2f21;font-family:Segoe UI,Arial,sans-serif}
+          .card{max-width:820px;margin:0 auto;background:#fffaf3;border:1px solid #dfcfb9;border-radius:16px;overflow:hidden}
+          .head{padding:16px 18px;border-bottom:1px solid #e7dbc8;background:#f8f2e8}
+          .title{font-size:20px;font-weight:700;margin:0 0 4px}
+          .muted{color:#7d6a55;font-size:13px}
+          .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:14px 18px 10px}
+          .box{background:#fff;border:1px solid #eadfce;border-radius:12px;padding:10px}
+          .label{font-size:11px;color:#8f7a62;text-transform:uppercase;font-weight:700;margin-bottom:4px}
+          .val{font-weight:600}
+          .items{padding:6px 18px 16px}
+          .items h3{font-size:15px;margin:8px 0 10px}
+          .item{display:grid;grid-template-columns:34px 48px 1fr auto;gap:10px;align-items:center;padding:8px 0;border-top:1px solid #efe5d8}
+          .item:first-of-type{border-top:none}
+          .item-index{font-size:13px;font-weight:700;color:#7d6a55;text-align:right}
+          .thumb{width:48px;height:48px;object-fit:cover;border-radius:10px;border:1px solid #eadfce;background:#fff}
+          .thumb.ph{display:flex;align-items:center;justify-content:center;font-size:20px;background:#f1eadf}
+          .name{font-size:14px;font-weight:700}
+          .sub{font-size:12px;color:#7d6a55}
+          .sum{font-size:13px;font-weight:700;white-space:nowrap}
+          .total{margin-top:10px;padding-top:10px;border-top:1px solid #dfcfb9;display:flex;justify-content:space-between;font-weight:700;font-size:16px;color:#8f6d46}
+          @media (max-width:640px){
+            .grid{grid-template-columns:1fr}
+            .item{grid-template-columns:30px 44px 1fr}
+            .sum{grid-column:3}
+          }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="head">
+            <div class="title">Заказ #${escapeHtml(order.order_number)}</div>
+            <div class="muted">${escapeHtml(order.restaurant_name || 'Магазин')} • ${escapeHtml(new Date(order.created_at).toLocaleString('ru-RU'))}</div>
+          </div>
+          <div class="grid">
+            <div class="box"><div class="label">Статус</div><div class="val">${escapeHtml(order.status)}</div></div>
+            <div class="box"><div class="label">Сумма</div><div class="val">${fmt(order.total_amount)} сум</div></div>
+            <div class="box"><div class="label">Клиент</div><div class="val">${escapeHtml(order.customer_name || '-')}</div></div>
+            <div class="box"><div class="label">Телефон</div><div class="val">${escapeHtml(order.customer_phone || '-')}</div></div>
+            <div class="box" style="grid-column:1/-1"><div class="label">Адрес</div><div class="val">${escapeHtml(order.delivery_address || 'По геолокации')}</div></div>
+          </div>
+          <div class="items">
+            <h3>Товары</h3>
+            ${itemsHtml || '<div class="muted">Нет данных по товарам</div>'}
+            ${Number(order.promo_discount_amount) > 0
+              ? `<div class="total" style="color:#9c4221"><span>Промокод${order.promo_code ? ` ${escapeHtml(order.promo_code)}` : ''}</span><span>−${fmt(order.promo_discount_amount)} сум</span></div>`
+              : ''}
+            <div class="total"><span>Итого</span><span>${fmt(order.total_amount)} сум</span></div>
+          </div>
+        </div>
+      </body></html>
+    `;
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (error) {
+    console.error('Operator preview error:', error);
+    res.status(500).send('Preview error');
+  }
+});
+
+// Get user orders
+router.get('/my-orders', authenticate, async (req, res) => {
+  try {
+    await pool.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS container_norm DECIMAL(10, 2) DEFAULT 1').catch(() => {});
+    await pool.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS selected_variant VARCHAR(120)').catch(() => {});
+
+    // Filter by active restaurant if user has one
+    const activeRestaurantId = req.user.active_restaurant_id;
+    
+    let query = `SELECT o.*, r.name as restaurant_name,
+              COALESCE(
+                json_agg(
+                  json_build_object(
+                    'id', oi.id,
+                    'product_name', oi.product_name,
+                    'selected_variant', oi.selected_variant,
+                    'quantity', oi.quantity,
+                    'unit', oi.unit,
+                    'price', oi.price,
+                    'total', oi.total,
+                    'container_name', oi.container_name,
+                    'container_price', oi.container_price,
+                    'container_norm', oi.container_norm,
+                    'image_url', p.image_url,
+                    'thumb_url', p.thumb_url,
+                    'product_images', p.product_images,
+                    'size_options', p.size_options
+                  )
+                ) FILTER (WHERE oi.id IS NOT NULL),
+                '[]'
+              ) as items
+       FROM orders o
+       LEFT JOIN restaurants r ON o.restaurant_id = r.id
+       LEFT JOIN order_items oi ON o.id = oi.order_id
+       LEFT JOIN products p ON p.id = oi.product_id
+       WHERE o.user_id = $1`;
+    
+    const params = [req.user.id];
+    
+    // If user has active restaurant, show only orders from that restaurant
+    if (activeRestaurantId) {
+      query += ` AND o.restaurant_id = $2`;
+      params.push(activeRestaurantId);
+    }
+    
+    query += ` GROUP BY o.id, r.name ORDER BY o.created_at DESC`;
+    
+    const result = await pool.query(query, params);
+    
+    res.json(result.rows.map(order => ({
+      ...order,
+      status: normalizeOrderStatus(order.status),
+      items: Array.isArray(order.items)
+        ? order.items.map((item) => ({
+          ...item,
+          image_url: resolveItemImageFromProduct(item)
+        }))
+        : []
+    })));
+  } catch (error) {
+    console.error('Orders error:', error);
+    res.status(500).json({ error: 'Ошибка получения заказов' });
+  }
+});
+
+// Resolve receipt delivery link for card payment orders
+router.get('/:id/receipt-link', authenticate, async (req, res) => {
+  try {
+    const orderId = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(orderId) || orderId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID заказа' });
+    }
+
+    const result = await pool.query(
+      `SELECT o.id, o.order_number, o.payment_method, o.user_id,
+              r.id AS restaurant_id,
+              r.support_username,
+              r.card_receipt_target,
+              r.telegram_bot_token
+       FROM orders o
+       LEFT JOIN restaurants r ON r.id = o.restaurant_id
+       WHERE o.id = $1 AND o.user_id = $2
+       LIMIT 1`,
+      [orderId, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Заказ не найден' });
+    }
+
+    const order = result.rows[0];
+    if (String(order.payment_method || '').trim().toLowerCase() !== 'card') {
+      return res.status(400).json({ error: 'Ссылка доступна только для оплаты картой' });
+    }
+
+    const receiptTarget = String(order.card_receipt_target || '').trim().toLowerCase() === 'admin' ? 'admin' : 'bot';
+    const supportUsername = String(order.support_username || '').trim().replace(/^@/, '');
+    if (receiptTarget === 'admin') {
+      if (!supportUsername) {
+        return res.status(400).json({ error: 'Username администратора не настроен' });
+      }
+      return res.json({
+        target: 'admin',
+        url: `https://t.me/${supportUsername}`
+      });
+    }
+
+    if (!order.telegram_bot_token) {
+      return res.status(400).json({ error: 'Бот магазина не настроен' });
+    }
+
+    const bot = getRestaurantBot(order.telegram_bot_token, order.restaurant_id);
+    if (!bot) {
+      return res.status(500).json({ error: 'Не удалось получить бота магазина' });
+    }
+
+    let botUsername = '';
+    try {
+      const me = await bot.getMe();
+      botUsername = String(me?.username || '').trim();
+    } catch (error) {
+      return res.status(500).json({ error: 'Не удалось определить username бота' });
+    }
+
+    if (!botUsername) {
+      return res.status(500).json({ error: 'У бота не найден username' });
+    }
+
+    return res.json({
+      target: 'bot',
+      url: `https://t.me/${botUsername}?start=receipt_${order.id}`
+    });
+  } catch (error) {
+    console.error('Get receipt link error:', error);
+    return res.status(500).json({ error: 'Ошибка получения ссылки для чека' });
+  }
+});
+
+// Get single order
+router.get('/:id', authenticate, async (req, res) => {
+  try {
+    const orderResult = await pool.query(`
+      SELECT o.*, r.name as restaurant_name
+      FROM orders o
+      LEFT JOIN restaurants r ON o.restaurant_id = r.id
+      WHERE o.id = $1 AND o.user_id = $2
+    `, [req.params.id, req.user.id]);
+    
+    if (orderResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Заказ не найден' });
+    }
+    
+    const itemsResult = await pool.query(
+      'SELECT * FROM order_items WHERE order_id = $1',
+      [req.params.id]
+    );
+    
+    res.json({
+      ...orderResult.rows[0],
+      status: normalizeOrderStatus(orderResult.rows[0].status),
+      items: itemsResult.rows
+    });
+  } catch (error) {
+    console.error('Order error:', error);
+    res.status(500).json({ error: 'Ошибка получения заказа' });
+  }
+});
+
+// Promo-code validator for the cart's "Apply" button. Read-only, never increments used_count.
+// Server is the source of truth — UI is not allowed to trust the discount.
+router.post('/promo/validate', authenticate, async (req, res) => {
+  try {
+    const restaurantId = Number(req.body?.restaurant_id);
+    const code = String(req.body?.code || '').trim();
+    const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (!Number.isFinite(restaurantId) || restaurantId <= 0) {
+      return res.status(400).json({ valid: false, reason: 'BAD_RESTAURANT' });
+    }
+    if (!code) return res.status(400).json({ valid: false, reason: 'EMPTY' });
+
+    const flagResult = await pool.query(
+      `SELECT promo_codes_enabled FROM restaurants WHERE id = $1`,
+      [restaurantId]
+    );
+    if (flagResult.rows[0]?.promo_codes_enabled !== true) {
+      return res.status(400).json({ valid: false, reason: 'DISABLED' });
+    }
+
+    // Items use the same line-total semantics as order creation (product + container, already
+    // multiplied by quantity), so the discount preview matches what will be applied at checkout.
+    const items = rawItems
+      .map((row) => ({
+        product_id: Number(row?.product_id) || null,
+        total: Number(row?.total) || 0
+      }))
+      .filter((row) => row.total > 0);
+
+    const result = await validatePromo({ restaurantId, code, items });
+    if (!result.valid) {
+      return res.json({ valid: false, reason: result.reason });
+    }
+    res.json({
+      valid: true,
+      promo: result.promo,
+      eligible_subtotal: result.eligibleSubtotal,
+      discount_amount: result.discountAmount
+    });
+  } catch (error) {
+    console.error('Promo validate error:', error);
+    res.status(500).json({ valid: false, reason: 'SERVER_ERROR' });
+  }
+});
+
+// Create order
+router.post('/', authenticate, async (req, res) => {
+  console.log('📦 ========== CREATE ORDER REQUEST ==========');
+  console.log('📦 User:', req.user?.id, req.user?.username);
+  console.log('📦 Body:', JSON.stringify(req.body, null, 2));
+  
+  const client = await pool.connect();
+  
+  try {
+    await client.query(
+      `ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS minimum_order_amount DECIMAL(12, 2) DEFAULT 0`
+    ).catch(() => {});
+    await ensureInventorySchema(client);
+    await client.query('BEGIN');
+
+    // 1. Rate limiting check (10 seconds)
+    const lastOrderResult = await client.query(
+      `SELECT id FROM orders WHERE user_id = $1 AND created_at > NOW() - INTERVAL '10 seconds' LIMIT 1`,
+      [req.user.id]
+    );
+    if (lastOrderResult.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(429).json({ error: 'Пожалуйста, подождите 10 секунд перед созданием нового заказа.' });
+    }
+    
+    const {
+      items,
+      delivery_address,
+      delivery_coordinates,
+      customer_name,
+      customer_phone,
+      payment_method,
+      comment,
+      delivery_date,
+      delivery_time,
+      restaurant_id,
+      service_fee,
+      delivery_cost,
+      delivery_distance_km,
+      fulfillment_type,
+      promo_code: rawPromoCode
+    } = req.body;
+    
+    console.log('📦 Parsed data:', {
+      items_count: items?.length,
+      delivery_address,
+      customer_phone,
+      restaurant_id,
+      delivery_time
+    });
+    
+    if (!items || items.length === 0) {
+      console.log('❌ Error: Empty cart');
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Корзина пуста' });
+    }
+    
+    // If restaurant_id not provided, try to get it from first product
+    let finalRestaurantId = restaurant_id;
+    if (!finalRestaurantId && items[0]?.product_id) {
+      console.log('📦 No restaurant_id, getting from product:', items[0].product_id);
+      const productResult = await client.query(
+        'SELECT restaurant_id FROM products WHERE id = $1',
+        [items[0].product_id]
+      );
+      if (productResult.rows.length > 0) {
+        finalRestaurantId = productResult.rows[0].restaurant_id;
+      }
+    }
+    
+    console.log('📦 Final restaurant_id:', finalRestaurantId);
+    
+    // Check restaurant settings (hours + delivery flag)
+    let isDeliveryEnabled = true;
+    let restaurantDeliveryZone = null;
+    let restaurantSettings = null;
+    let forcedDeliveryDate = null;
+    if (finalRestaurantId) {
+      const hoursResult = await client.query(
+        `SELECT start_time, end_time, is_delivery_enabled,
+                COALESCE(is_pickup_enabled, true) AS is_pickup_enabled,
+                delivery_zone,
+                latitude, longitude,
+                delivery_base_radius, delivery_base_price, delivery_price_per_km,
+                delivery_pricing_mode, delivery_fixed_price,
+                payme_enabled, payme_merchant_id, payme_api_login, payme_api_password,
+                card_receipt_target, cash_enabled, minimum_order_amount,
+                is_scheduled_date_delivery_enabled, scheduled_delivery_max_days,
+                COALESCE(delivery_lead_enabled, false) AS delivery_lead_enabled,
+                COALESCE(delivery_lead_days, 1) AS delivery_lead_days
+         FROM restaurants
+         WHERE id = $1`,
+        [finalRestaurantId]
+      );
+      restaurantSettings = hoursResult.rows[0] || null;
+      isDeliveryEnabled = isEnabledFlag(restaurantSettings?.is_delivery_enabled);
+      restaurantDeliveryZone = restaurantSettings?.delivery_zone || null;
+      // Срок изготовления/доставки: форсируем дату доставки на сегодня + N дней для всего заказа.
+      if (restaurantSettings?.delivery_lead_enabled === true) {
+        const leadDays = Math.max(1, Math.trunc(Number(restaurantSettings.delivery_lead_days) || 1));
+        const leadDate = getNowInRestaurantTimezone();
+        leadDate.setDate(leadDate.getDate() + leadDays);
+        forcedDeliveryDate = `${leadDate.getFullYear()}-${String(leadDate.getMonth() + 1).padStart(2, '0')}-${String(leadDate.getDate()).padStart(2, '0')}`;
+      }
+      console.log('📦 Restaurant hours:', restaurantSettings);
+
+      const isFutureDate = (() => {
+        if (!delivery_date) return false;
+        const now = getNowInRestaurantTimezone();
+        const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+        return String(delivery_date).trim() > todayStr;
+      })();
+
+      if (isFutureDate) {
+        const scheduledEnabled = isEnabledFlag(restaurantSettings?.is_scheduled_date_delivery_enabled);
+        if (!scheduledEnabled) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Доставка на выбранную дату не доступна для этого магазина' });
+        }
+        const maxDays = Math.max(1, Math.trunc(Number(restaurantSettings?.scheduled_delivery_max_days) || 7));
+        const now = getNowInRestaurantTimezone();
+        const maxDate = new Date(now);
+        maxDate.setDate(maxDate.getDate() + maxDays);
+        const maxDateStr = `${maxDate.getFullYear()}-${String(maxDate.getMonth() + 1).padStart(2, '0')}-${String(maxDate.getDate()).padStart(2, '0')}`;
+        if (String(delivery_date).trim() > maxDateStr) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: `Максимальная дата доставки: ${maxDateStr}` });
+        }
+      }
+
+      if (!isFutureDate && restaurantSettings?.start_time && restaurantSettings?.end_time) {
+        const now = getNowInRestaurantTimezone();
+        const startTime = restaurantSettings.start_time.substring(0, 5);
+        const endTime = restaurantSettings.end_time.substring(0, 5);
+        const [openH, openM] = startTime.split(':').map(Number);
+        const [closeH, closeM] = endTime.split(':').map(Number);
+        const openMinutes = openH * 60 + openM;
+        const closeMinutes = closeH * 60 + closeM;
+        const nowMinutes = now.getHours() * 60 + now.getMinutes();
+        const isOpen = openMinutes < closeMinutes
+          ? nowMinutes >= openMinutes && nowMinutes < closeMinutes
+          : nowMinutes >= openMinutes || nowMinutes < closeMinutes;
+
+        console.log('📦 Time check:', { startTime, endTime, nowMinutes, openMinutes, closeMinutes, isOpen });
+
+        if (!isOpen) {
+          console.log('❌ Restaurant closed');
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            error: `Магазин работает с ${startTime} по ${endTime}`
+          });
+        }
+      }
+    }
+
+    const productIds = [...new Set(
+      items
+        .map((item) => Number.parseInt(item?.product_id, 10))
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )];
+
+    const hasInvalidProduct = items.some(item => {
+      const pId = Number.parseInt(item?.product_id, 10);
+      return !Number.isInteger(pId) || pId <= 0;
+    });
+    if (hasInvalidProduct || productIds.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'В корзине есть недействительные товары' });
+    }
+
+    const productsResult = await client.query(
+      `SELECT
+         p.id,
+         p.restaurant_id,
+         p.price,
+         p.size_enabled,
+         p.size_options,
+         p.in_stock,
+         COALESCE(NULLIF(p.name_ru, ''), NULLIF(p.name_uz, ''), '') AS name,
+         COALESCE(NULLIF(cnt.name, ''), '') AS container_name,
+         COALESCE(cnt.price, 0) AS container_price,
+         COALESCE(NULLIF(p.container_norm, 0), 1) AS container_norm
+       FROM products p
+       LEFT JOIN containers cnt ON cnt.id = p.container_id
+       WHERE p.id = ANY($1::int[])`,
+      [productIds]
+    );
+
+    if (productsResult.rows.length !== productIds.length) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Некоторые товары в вашей корзине больше не доступны.' });
+    }
+
+    // Apply segment pricing (so we validate against the segment-specific price if any)
+    const { applySegmentPricingToRows } = require('../services/segmentPricing');
+    if (finalRestaurantId) {
+      await applySegmentPricingToRows(productsResult.rows, {
+        restaurantId: finalRestaurantId,
+        userId: req.user.id
+      }).catch((segErr) => console.error('Segment pricing validation error:', segErr.message));
+    }
+
+    const productMap = new Map();
+    for (const prod of productsResult.rows) {
+      if (Number(prod.restaurant_id) !== Number(finalRestaurantId)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: `Товар "${prod.name}" не принадлежит этому магазину` });
+      }
+      if (!prod.in_stock) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: `Товара "${prod.name}" нет в наличии` });
+      }
+      productMap.set(prod.id, prod);
+    }
+
+    const normalizedItems = [];
+    for (const rawItem of items) {
+      const pId = Number.parseInt(rawItem?.product_id, 10);
+      const product = productMap.get(pId);
+      
+      const quantity = toNumeric(rawItem?.quantity, 0);
+      const clientPrice = toNumeric(rawItem?.price, 0);
+      const selectedVariant = normalizeSelectedVariant(rawItem?.selected_variant ?? rawItem?.selectedVariant);
+
+      // Verify price
+      let expectedPrice = toNumeric(product.price, 0);
+      if (product.size_enabled && Array.isArray(product.size_options) && selectedVariant) {
+        const matchingOption = product.size_options.find(opt => 
+          normalizeSelectedVariant(opt?.name) === selectedVariant
+        );
+        if (matchingOption) {
+          expectedPrice = toNumeric(matchingOption.price, 0);
+        } else {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: `Выбранный вариант "${selectedVariant}" для товара "${product.name}" не существует` });
+        }
+      }
+
+      if (Math.abs(clientPrice - expectedPrice) > 0.01) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: `Несоответствие цены для товара "${product.name}". Пожалуйста, обновите корзину.` });
+      }
+
+      // Force container config from DB
+      const resolvedContainerPrice = Math.max(0, toNumeric(product.container_price, 0));
+      const resolvedContainerNorm = normalizeContainerNorm(product.container_norm, 1);
+      const resolvedContainerName = product.container_name || null;
+
+      const resolvedProductName = product.name || 'Товар';
+      const resolvedUnit = String(rawItem?.unit || '').trim() || 'шт';
+
+      normalizedItems.push({
+        ...rawItem,
+        product_id: pId,
+        product_name: resolvedProductName,
+        selected_variant: selectedVariant,
+        quantity,
+        price: expectedPrice,
+        unit: resolvedUnit,
+        container_name: resolvedContainerName,
+        container_price: resolvedContainerPrice,
+        container_norm: resolvedContainerNorm
+      });
+    }
+
+    const requestedFulfillmentType = normalizeFulfillmentType(fulfillment_type, 'delivery');
+    const isPickupEnabled = restaurantSettings?.is_pickup_enabled !== false;
+    // Магазин запретил самовывоз и оставил доставку — принудительно doставка.
+    // Если оба выключены — заказ не примем дальше по обычной валидации (не должно случиться через UI).
+    if (!isDeliveryEnabled && !isPickupEnabled) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Магазин сейчас не принимает заказы' });
+    }
+    let effectiveFulfillmentType;
+    if (requestedFulfillmentType === 'pickup') {
+      effectiveFulfillmentType = isPickupEnabled ? 'pickup' : 'delivery';
+    } else {
+      effectiveFulfillmentType = isDeliveryEnabled ? 'delivery' : 'pickup';
+    }
+    const isPickupOrder = effectiveFulfillmentType === 'pickup';
+    const normalizedDeliveryAddress = isPickupOrder
+      ? 'Самовывоз'
+      : (String(delivery_address || '').trim() || (delivery_coordinates ? 'По геолокации' : ''));
+    const normalizedDeliveryCoordinates = isPickupOrder
+      ? null
+      : (delivery_coordinates || null);
+    let deliveryPointLat = null;
+    let deliveryPointLng = null;
+
+    if (!isPickupOrder) {
+      if (!normalizedDeliveryCoordinates) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Укажите точку доставки на карте' });
+      }
+
+      const coordinates = String(normalizedDeliveryCoordinates || '').split(',').map((v) => Number.parseFloat(v.trim()));
+      const lat = coordinates[0];
+      const lng = coordinates[1];
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Некорректные координаты доставки' });
+      }
+      deliveryPointLat = lat;
+      deliveryPointLng = lng;
+
+      const inZone = isInDeliveryZone(restaurantDeliveryZone, lat, lng);
+      if (!inZone) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Адрес вне зоны доставки этого магазина' });
+      }
+    }
+
+    // Товары без фасовки — для проверки минимальной суммы заказа
+    const goodsSubtotalNoContainers = normalizedItems.reduce((sum, item) => {
+      const quantity = toNumeric(item.quantity, 0);
+      const itemPrice = toNumeric(item.price, 0) * quantity;
+      return sum + itemPrice;
+    }, 0);
+
+    const minOrderRequired = Math.max(0, Number.parseFloat(restaurantSettings?.minimum_order_amount) || 0);
+    if (finalRestaurantId && minOrderRequired > 0 && goodsSubtotalNoContainers + 1e-6 < minOrderRequired) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: `Минимальная сумма заказа (без доставки, сервиса и фасовки): ${minOrderRequired}`,
+        code: 'MINIMUM_ORDER_NOT_MET',
+        minimum_order_amount: minOrderRequired,
+        goods_subtotal: Math.round(goodsSubtotalNoContainers * 100) / 100
+      });
+    }
+
+    // Calculate total (items + containers + service fee + delivery)
+    const itemsTotal = normalizedItems.reduce((sum, item) => {
+      const quantity = toNumeric(item.quantity, 0);
+      const itemPrice = toNumeric(item.price, 0) * quantity;
+      const containerUnits = resolveContainerUnits(quantity, item.container_norm);
+      const containerPrice = toNumeric(item.container_price, 0) * containerUnits;
+      return sum + itemPrice + containerPrice;
+    }, 0);
+    
+    const serviceFee = parseFloat(service_fee) || 0;
+    let deliveryCost = !isPickupOrder ? (parseFloat(delivery_cost) || 0) : 0;
+    let deliveryDistanceKm = !isPickupOrder ? (parseFloat(delivery_distance_km) || 0) : 0;
+    const deliveryPricingMode = normalizeDeliveryPricingMode(restaurantSettings?.delivery_pricing_mode, 'dynamic');
+    const deliveryFixedPrice = Math.max(0, toNumeric(restaurantSettings?.delivery_fixed_price, DEFAULT_DELIVERY_FIXED_PRICE));
+    if (!isPickupOrder && deliveryPricingMode === 'fixed') {
+      deliveryCost = deliveryFixedPrice;
+      deliveryDistanceKm = 0;
+    } else if (!isPickupOrder && Number.isFinite(deliveryPointLat) && Number.isFinite(deliveryPointLng)) {
+      const restaurantLat = Number.parseFloat(restaurantSettings?.latitude);
+      const restaurantLng = Number.parseFloat(restaurantSettings?.longitude);
+      if (Number.isFinite(restaurantLat) && Number.isFinite(restaurantLng)) {
+        const roadDistanceKm = await getRoadDistanceKm(restaurantLat, restaurantLng, deliveryPointLat, deliveryPointLng);
+        const computedDistanceKm = Number.isFinite(roadDistanceKm)
+          ? roadDistanceKm
+          : (getHaversineDistanceKm(restaurantLat, restaurantLng, deliveryPointLat, deliveryPointLng) * 1.3);
+        const baseRadius = Number.parseFloat(restaurantSettings?.delivery_base_radius) || DEFAULT_DELIVERY_BASE_RADIUS_KM;
+        const basePrice = Number.parseFloat(restaurantSettings?.delivery_base_price) || DEFAULT_DELIVERY_BASE_PRICE;
+        const pricePerKm = Number.parseFloat(restaurantSettings?.delivery_price_per_km) || DEFAULT_DELIVERY_PRICE_PER_KM;
+        let computedCost = basePrice;
+        if (computedDistanceKm > baseRadius) {
+          const extraKm = computedDistanceKm - baseRadius;
+          computedCost = basePrice + (extraKm * pricePerKm);
+        }
+        deliveryDistanceKm = Math.round(computedDistanceKm * 100) / 100;
+        deliveryCost = Math.round(computedCost / 500) * 500;
+      }
+    }
+    // Apply promo code (atomic — re-validates and increments used_count inside the txn).
+    // We pass per-line totals so the service can compute "applies to selected products" correctly.
+    let promoCodeApplied = null;
+    let promoDiscountAmount = 0;
+    const trimmedPromoCode = typeof rawPromoCode === 'string' ? rawPromoCode.trim() : '';
+    if (trimmedPromoCode && finalRestaurantId) {
+      const restaurantPromoFlag = await client.query(
+        `SELECT promo_codes_enabled FROM restaurants WHERE id = $1`,
+        [finalRestaurantId]
+      );
+      const promoEnabled = restaurantPromoFlag.rows[0]?.promo_codes_enabled === true;
+      if (promoEnabled) {
+        const itemsForPromo = normalizedItems.map((item) => {
+          const qty = toNumeric(item.quantity, 0);
+          const linePrice = toNumeric(item.price, 0) * qty;
+          const containerUnits = resolveContainerUnits(qty, item.container_norm);
+          const containerLine = toNumeric(item.container_price, 0) * containerUnits;
+          return {
+            product_id: Number(item.product_id) || null,
+            total: linePrice + containerLine
+          };
+        });
+        const promoResult = await applyPromoForOrder({
+          client,
+          restaurantId: finalRestaurantId,
+          code: trimmedPromoCode,
+          items: itemsForPromo
+        });
+        if (!promoResult.applied) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            error: 'Промокод недействителен',
+            code: 'PROMO_INVALID',
+            reason: promoResult.reason
+          });
+        }
+        promoCodeApplied = promoResult.code;
+        promoDiscountAmount = Number(promoResult.discountAmount) || 0;
+      }
+    }
+
+    const totalAmount = Math.max(0, itemsTotal + serviceFee + deliveryCost - promoDiscountAmount);
+    const normalizedPaymentMethod = String(payment_method || 'cash').trim().toLowerCase() || 'cash';
+    const isCashEnabled = restaurantSettings?.cash_enabled === undefined || restaurantSettings?.cash_enabled === null
+      ? true
+      : isEnabledFlag(restaurantSettings?.cash_enabled);
+
+    if (normalizedPaymentMethod === 'cash' && !isCashEnabled) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Оплата наличными отключена для этого магазина' });
+    }
+
+    if (normalizedPaymentMethod === 'payme' && !isPaymeConfigured(restaurantSettings)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Payme не настроен для этого магазина' });
+    }
+
+    const initialPaymentStatus = normalizedPaymentMethod === 'payme' ? 'pending' : 'unpaid';
+    let inventoryReserved = false;
+    
+    // Generate short order number (5 digits)
+    const orderNumber = String(Math.floor(10000 + Math.random() * 90000));
+    
+    // Handle delivery_time - convert "asap" to null for database
+    const dbDeliveryTime = (delivery_time && delivery_time !== 'asap') ? delivery_time : null;
+    
+    console.log('📦 Creating order with:', {
+      finalRestaurantId,
+      userId: req.user.id,
+      totalAmount,
+      serviceFee,
+      normalizedDeliveryAddress,
+      customer_name: customer_name || req.user.full_name || 'Клиент',
+      customer_phone,
+      dbDeliveryTime
+    });
+    
+    // Ensure required columns exist
+    try {
+      await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_fee DECIMAL(15, 2) DEFAULT 0');
+      await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_cost DECIMAL(15, 2) DEFAULT 0');
+      await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_distance_km DECIMAL(10, 2) DEFAULT 0');
+      await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS inventory_reserved BOOLEAN DEFAULT false');
+      await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS promo_code VARCHAR(64)');
+      await client.query('ALTER TABLE orders ADD COLUMN IF NOT EXISTS promo_discount_amount DECIMAL(15, 2) DEFAULT 0');
+      await client.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS container_name VARCHAR(255)');
+      await client.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS container_price DECIMAL(15, 2) DEFAULT 0');
+      await client.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS container_norm DECIMAL(10, 2) DEFAULT 1');
+      await client.query('ALTER TABLE order_items ADD COLUMN IF NOT EXISTS selected_variant VARCHAR(120)');
+    } catch (e) {
+      console.log('ℹ️ Orders columns check:', e.message);
+    }
+
+    if (finalRestaurantId) {
+      const reservationResult = await reserveInventoryForOrder({
+        client,
+        restaurantId: finalRestaurantId,
+        items: normalizedItems
+      });
+      inventoryReserved = reservationResult?.reserved === true;
+    }
+    
+    // Create order
+    const orderResult = await client.query(
+      `INSERT INTO orders (
+        restaurant_id, user_id, order_number, total_amount, delivery_address,
+        delivery_coordinates, customer_name, customer_phone,
+        payment_method, payment_status, comment, delivery_date, delivery_time, status, service_fee,
+        delivery_cost, delivery_distance_km, inventory_reserved,
+        promo_code, promo_discount_amount
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+      RETURNING *`,
+      [
+        finalRestaurantId, req.user.id, orderNumber, totalAmount, normalizedDeliveryAddress,
+        normalizedDeliveryCoordinates, customer_name || req.user.full_name || 'Клиент', customer_phone,
+        normalizedPaymentMethod, initialPaymentStatus, comment, (forcedDeliveryDate || delivery_date), dbDeliveryTime, 'new', serviceFee,
+        deliveryCost, deliveryDistanceKm, inventoryReserved,
+        promoCodeApplied, promoDiscountAmount
+      ]
+    );
+    
+    const order = orderResult.rows[0];
+    
+    // Create order items
+    for (const item of normalizedItems) {
+      await client.query(
+        `INSERT INTO order_items (
+          order_id, product_id, product_name, selected_variant, quantity, unit, price, total, container_name, container_price, container_norm
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [
+          order.id,
+          item.product_id || null,
+          item.product_name,
+          item.selected_variant || null,
+          item.quantity,
+          item.unit,
+          item.price,
+          toNumeric(item.price, 0) * toNumeric(item.quantity, 0),
+          item.container_name || null,
+          toNumeric(item.container_price, 0),
+          normalizeContainerNorm(item.container_norm, 1)
+        ]
+      );
+    }
+    
+    // Add status history
+    await client.query(
+      'INSERT INTO order_status_history (order_id, status, changed_by) VALUES ($1, $2, $3)',
+      [order.id, 'new', req.user.id]
+    );
+    
+    await client.query('COMMIT');
+    
+    const shouldNotifyImmediately = normalizedPaymentMethod !== 'payme';
+
+    // Send notifications using restaurant's bot if configured
+    if (shouldNotifyImmediately && finalRestaurantId) {
+      await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS card_bank_account VARCHAR(64)').catch(() => {});
+      const restaurantResult = await pool.query(
+        `SELECT telegram_bot_token, telegram_group_id, click_url, payme_url, uzum_url, xazna_url,
+                card_payment_title, card_payment_number, card_payment_holder,
+                card_bank_account, card_bank_name, card_bank_inn, card_bank_mfo, card_bank_legal_address, card_bank_oked, card_bank_okonx,
+                card_receipt_target, support_username
+         FROM restaurants
+         WHERE id = $1`,
+        [finalRestaurantId]
+      );
+      const restaurant = restaurantResult.rows[0];
+      if (restaurant?.telegram_group_id) {
+        // Use restaurant-specific bot/group for notification
+        await sendOrderNotification(order, normalizedItems, restaurant.telegram_group_id, restaurant.telegram_bot_token);
+
+        const cardReceiptTarget = String(restaurant?.card_receipt_target || '').trim().toLowerCase() === 'admin' ? 'admin' : 'bot';
+        if (normalizedPaymentMethod === 'card' && cardReceiptTarget === 'bot') {
+          await sendCardReceiptPlaceholderToGroup(
+            {
+              ...order,
+              telegram_bot_token: restaurant.telegram_bot_token,
+              admin_chat_id: restaurant.telegram_group_id
+            },
+            {
+              chatId: restaurant.telegram_group_id,
+              botToken: restaurant.telegram_bot_token,
+              restaurantId: finalRestaurantId
+            }
+          );
+        }
+      } else {
+        // Fall back to default notification
+        await sendOrderNotification(order, normalizedItems);
+      }
+      
+      // Send notification to user with payment link
+      if (req.user.telegram_id) {
+        const paymentUrls = {
+          click_url: restaurant?.click_url,
+          payme_url: restaurant?.payme_url,
+          uzum_url: restaurant?.uzum_url,
+          xazna_url: restaurant?.xazna_url,
+          card_payment_title: restaurant?.card_payment_title,
+          card_payment_number: restaurant?.card_payment_number,
+          card_payment_holder: restaurant?.card_payment_holder,
+          card_bank_account: restaurant?.card_bank_account,
+          card_bank_name: restaurant?.card_bank_name,
+          card_bank_inn: restaurant?.card_bank_inn,
+          card_bank_mfo: restaurant?.card_bank_mfo,
+          card_bank_legal_address: restaurant?.card_bank_legal_address,
+          card_bank_oked: restaurant?.card_bank_oked,
+          card_bank_okonx: restaurant?.card_bank_okonx,
+          card_receipt_target: restaurant?.card_receipt_target,
+          support_username: restaurant?.support_username
+        };
+        await sendOrderUpdateToUser(req.user.telegram_id, order, 'new', restaurant?.telegram_bot_token, paymentUrls);
+      }
+    } else if (shouldNotifyImmediately) {
+      await sendOrderNotification(order, normalizedItems);
+      
+      // Send notification to user
+      if (req.user.telegram_id) {
+        await sendOrderUpdateToUser(req.user.telegram_id, order, 'new');
+      }
+    }
+
+    // Lightweight notice print for incoming orders (without sensitive customer data).
+    if (shouldNotifyImmediately && finalRestaurantId) {
+      try {
+        const noticeQueued = await printerManager.printOrderNotice(finalRestaurantId, order.id);
+        if (!noticeQueued) {
+          console.warn(`Auto notice print skipped/failed: restaurant=${finalRestaurantId}, order=${order.id}`);
+        }
+      } catch (printErr) {
+        console.error('Auto notice print error:', printErr);
+      }
+    }
+    
+    try {
+      const sseManager = require('../services/sseManager');
+      sseManager.broadcast(finalRestaurantId, 'order_created', { orderId: order.id });
+    } catch (sseErr) {
+      console.error('SSE broadcast error:', sseErr.message);
+    }
+
+    res.status(201).json({
+      message: 'Заказ создан успешно',
+      order: {
+        ...order,
+        items: normalizedItems
+      }
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error?.code === 'INVENTORY_SHORTAGE') {
+      return res.status(error.status || 409).json({
+        error: error.message || 'Недостаточно остатка товара на складе',
+        code: error.code,
+        details: Array.isArray(error.details) ? error.details : []
+      });
+    }
+    console.error('❌ ========== CREATE ORDER ERROR ==========');
+    console.error('❌ Error message:', error.message);
+    console.error('❌ Error code:', error.code);
+    console.error('❌ Error detail:', error.detail);
+    console.error('❌ Error stack:', error.stack);
+    res.status(500).json({ error: 'Ошибка создания заказа: ' + error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Cancel order (only if status is 'new')
+router.post('/:id/cancel', authenticate, async (req, res) => {
+  const client = await pool.connect();
+  
+  try {
+    await ensureInventorySchema(client);
+    await client.query('BEGIN');
+    
+    // Check if order exists and belongs to user
+    const orderResult = await client.query(
+      'SELECT * FROM orders WHERE id = $1 AND user_id = $2 FOR UPDATE',
+      [req.params.id, req.user.id]
+    );
+    
+    if (orderResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Заказ не найден' });
+    }
+    
+    const order = orderResult.rows[0];
+    
+    // Can only cancel if status is 'new'
+    if (order.status !== 'new') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Заказ уже обрабатывается, отмена невозможна' });
+    }
+
+    if (order.restaurant_id && isInventoryTrackingEnabled(order.inventory_reserved)) {
+      const orderItemsResult = await client.query(
+        `SELECT product_id, quantity, product_name, selected_variant
+         FROM order_items
+         WHERE order_id = $1`,
+        [req.params.id]
+      );
+      await releaseInventoryForOrder({
+        client,
+        restaurantId: order.restaurant_id,
+        items: orderItemsResult.rows
+      });
+    }
+    
+    // Update status to cancelled
+    await client.query(
+      'UPDATE orders SET status = $1, inventory_reserved = false, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      ['cancelled', req.params.id]
+    );
+    
+    // Add to status history
+    await client.query(
+      'INSERT INTO order_status_history (order_id, status, changed_by) VALUES ($1, $2, $3)',
+      [req.params.id, 'cancelled', req.user.id]
+    );
+    
+    await client.query('COMMIT');
+    
+    // Get restaurant bot token for notifications
+    let restaurantBotToken = null;
+    let restaurantGroupId = null;
+    if (order.restaurant_id) {
+      const restaurantResult = await pool.query(
+        'SELECT telegram_bot_token, telegram_group_id FROM restaurants WHERE id = $1',
+        [order.restaurant_id]
+      );
+      if (restaurantResult.rows[0]) {
+        restaurantBotToken = restaurantResult.rows[0].telegram_bot_token;
+        restaurantGroupId = restaurantResult.rows[0].telegram_group_id;
+      }
+    }
+    
+    const cancelledOrderForResponse = { ...order, status: 'cancelled', inventory_reserved: false };
+
+    // Notify user using restaurant's bot
+    if (req.user.telegram_id) {
+      const { sendOrderUpdateToUser } = require('../bot/notifications');
+      await sendOrderUpdateToUser(
+        req.user.telegram_id, 
+        cancelledOrderForResponse, 
+        'cancelled',
+        restaurantBotToken
+      );
+    }
+
+    // Update group notification (remove buttons)
+    try {
+      await updateOrderNotificationForCustomerCancel(
+        cancelledOrderForResponse,
+        restaurantBotToken,
+        restaurantGroupId
+      );
+    } catch (error) {
+      console.error('Update group cancel message error:', error);
+    }
+    
+    try {
+      const sseManager = require('../services/sseManager');
+      sseManager.broadcast(order.restaurant_id, 'order_updated', { orderId: order.id, status: 'cancelled' });
+    } catch (sseErr) {
+      console.error('SSE broadcast error:', sseErr.message);
+    }
+
+    res.json({ message: 'Заказ отменен', order: cancelledOrderForResponse });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Cancel order error:', error);
+    res.status(500).json({ error: 'Ошибка отмены заказа' });
+  } finally {
+    client.release();
+  }
+});
+
+// =====================================================
+// FEEDBACK (Complaints & Suggestions)
+// =====================================================
+
+// Create feedback (for customers)
+router.post('/feedback', authenticate, async (req, res) => {
+  try {
+    const { type, message } = req.body;
+    
+    if (!message || message.trim().length === 0) {
+      return res.status(400).json({ error: 'Сообщение обязательно' });
+    }
+    
+    const restaurantId = req.user.active_restaurant_id;
+    if (!restaurantId) {
+      return res.status(400).json({ error: 'Ресторан не выбран' });
+    }
+    
+    // Get user info
+    const userResult = await pool.query(
+      'SELECT full_name, phone FROM users WHERE id = $1',
+      [req.user.id]
+    );
+    const userData = userResult.rows[0] || {};
+    
+    const result = await pool.query(`
+      INSERT INTO feedback (restaurant_id, user_id, customer_name, customer_phone, type, message)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING *
+    `, [
+      restaurantId,
+      req.user.id,
+      userData.full_name || 'Клиент',
+      userData.phone || '',
+      type || 'complaint',
+      message.trim()
+    ]);
+    
+    res.status(201).json({ 
+      message: 'Ваше обращение отправлено. Спасибо за обратную связь!',
+      feedback: result.rows[0] 
+    });
+  } catch (error) {
+    console.error('Create feedback error:', error);
+    res.status(500).json({ error: 'Ошибка отправки обращения' });
+  }
+});
+
+// Get my feedback (for customers)
+router.get('/my-feedback', authenticate, async (req, res) => {
+  try {
+    const restaurantId = req.user.active_restaurant_id;
+    
+    let query = `
+      SELECT f.*, r.name as restaurant_name
+      FROM feedback f
+      LEFT JOIN restaurants r ON f.restaurant_id = r.id
+      WHERE f.user_id = $1
+    `;
+    const params = [req.user.id];
+    
+    if (restaurantId) {
+      query += ` AND f.restaurant_id = $2`;
+      params.push(restaurantId);
+    }
+    
+    query += ` ORDER BY f.created_at DESC`;
+    
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Get my feedback error:', error);
+    res.status(500).json({ error: 'Ошибка получения обращений' });
+  }
+});
+
+module.exports = router;

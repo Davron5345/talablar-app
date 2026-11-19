@@ -1,0 +1,13636 @@
+const express = require('express');
+const router = express.Router();
+const pool = require('../database/connection');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const sharp = require('sharp');
+const multer = require('multer');
+const axios = require('axios');
+const bcrypt = require('bcryptjs');
+const TelegramBot = require('node-telegram-bot-api');
+const { authenticate, requireSuperAdmin } = require('../middleware/auth');
+const {
+  logActivity,
+  getActivityLogs,
+  getActivityStats,
+  refreshUserTelemetryFromActivityLogs,
+  ensureUserTelemetrySchema,
+  getIpFromRequest,
+  getUserAgentFromRequest,
+  ACTION_TYPES,
+  ENTITY_TYPES
+} = require('../services/activityLogger');
+const { reloadBot, getBot, getActiveSuperadminBotToken } = require('../bot/bot');
+const { reloadMultiBots } = require('../bot/multiBotManager');
+const {
+  ensureHelpInstructionsSchema,
+  isValidYouTubeUrl,
+  listHelpInstructions,
+  resolveNextSortOrder,
+  createHelpInstruction,
+  updateHelpInstruction,
+  incrementHelpInstructionViewCount,
+  deleteHelpInstruction
+} = require('../services/helpInstructions');
+const { ensureBotFunnelSchema } = require('../services/botFunnel');
+const { listSessionsForUsers, revokeSessions } = require('../services/superadminSessions');
+const { ensureReservationSchema } = require('../services/reservationSchema');
+const { ensureOrderRatingsSchema, normalizeOrderRating } = require('../services/orderRatings');
+const {
+  ensureSecurityEventsSchema,
+  listSecurityEvents,
+  getSecurityEventsStats,
+  setSecurityEventStatus
+} = require('../services/securityEvents');
+const {
+  ensurePrintFormSettingsSchema,
+  normalizePrintFormSettingsPayload
+} = require('../services/printFormSettings');
+const { ensureCheckConstraint } = require('../database/constraintHelpers');
+
+async function copyTemplateCategoriesToRestaurant(clientOrPool, restaurantId) {
+  const templateRes = await clientOrPool.query(
+    'SELECT * FROM categories WHERE restaurant_id IS NULL ORDER BY id ASC'
+  );
+  const templates = templateRes.rows;
+  if (templates.length === 0) return;
+
+  const idMapping = new Map();
+
+  async function copyCategory(cat) {
+    if (idMapping.has(cat.id)) return idMapping.get(cat.id);
+
+    let newParentId = null;
+    if (cat.parent_id) {
+      const parentCat = templates.find(c => c.id === cat.parent_id);
+      if (parentCat) {
+        newParentId = await copyCategory(parentCat);
+      }
+    }
+
+    const insertRes = await clientOrPool.query(
+      `INSERT INTO categories (restaurant_id, name_ru, name_uz, image_url, sort_order, is_active, parent_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [restaurantId, cat.name_ru, cat.name_uz, cat.image_url, cat.sort_order, cat.is_active, newParentId]
+    );
+    const newId = insertRes.rows[0].id;
+    idMapping.set(cat.id, newId);
+    return newId;
+  }
+
+  for (const cat of templates) {
+    await copyCategory(cat);
+  }
+}
+const {
+  sendServerStatsToChat,
+  refreshSuperadminServerMonitoringSchedule,
+  normalizeStatsInterval
+} = require('../services/superadminServerMonitoring');
+const {
+  checkRestaurantIdentityAvailability
+} = require('../services/restaurantUniqueness');
+const {
+  validateRestaurantName,
+  normalizeRestaurantNameForStorage,
+  sanitizeExistingRestaurantName
+} = require('../services/restaurantNamePolicy');
+
+// All routes require superadmin authentication
+router.use(authenticate);
+router.use(requireSuperAdmin);
+router.use((req, res, next) => {
+  if (req.user?.role !== 'moderator') return next();
+  const rawHeaderTab = String(req.headers['x-superadmin-tab'] || '').trim().toLowerCase();
+  const pathValue = String(req.path || '').toLowerCase();
+  const inferredTab = (() => {
+    if (rawHeaderTab && SUPERADMIN_MENU_KEY_SET.has(rawHeaderTab)) return rawHeaderTab;
+    if (pathValue.startsWith('/stats') || pathValue.startsWith('/analytics')) return 'analytics';
+    if (pathValue.startsWith('/restaurants')) return 'restaurants';
+    if (pathValue.startsWith('/global-products')) return 'global_products';
+    if (pathValue.startsWith('/operators')) return 'operators';
+    if (pathValue.startsWith('/customers')) return 'customers';
+    if (pathValue.startsWith('/ads')) return 'ads';
+    if (pathValue.startsWith('/founders') || pathValue.startsWith('/billing/transactions')) return 'founders';
+    if (
+      pathValue.startsWith('/categories')
+      || pathValue.startsWith('/activity-types')
+      || pathValue.startsWith('/reservation-table-templates')
+      || pathValue.startsWith('/help-instructions')
+      || pathValue.startsWith('/broadcast')
+      || pathValue.startsWith('/billing/settings')
+      || pathValue.startsWith('/security')
+      || pathValue.startsWith('/ai/')
+    ) {
+      return 'settings';
+    }
+    return '';
+  })();
+  const tab = inferredTab;
+  if (!SUPERADMIN_MENU_KEY_SET.has(tab)) {
+    return res.status(403).json({ error: 'Для модератора не указан раздел доступа' });
+  }
+  const permissions = normalizeModeratorPermissions(req.user.moderator_permissions);
+  const tabPerm = permissions[tab] || { view: false, edit: false };
+  const isRead = req.method === 'GET' || req.method === 'HEAD';
+  const isAllowed = isRead ? (tabPerm.view || tabPerm.edit) : tabPerm.edit;
+  if (!isAllowed) {
+    return res.status(403).json({ error: 'Недостаточно прав модератора для этого действия' });
+  }
+  return next();
+});
+
+const { sendBalanceNotification, getRestaurantBot } = require('../bot/notifications');
+
+const MAX_CATEGORY_LEVEL = 3;
+const CATEGORY_CHAIN_GUARD_LIMIT = 50;
+const CATEGORY_SORT_ORDER_MIN = 0;
+const CATEGORY_SORT_ORDER_MAX = 1000000;
+const SUPERADMIN_MENU_KEYS = ['analytics', 'restaurants', 'global_products', 'operators', 'customers', 'ads', 'founders', 'settings'];
+const SUPERADMIN_MENU_KEY_SET = new Set(SUPERADMIN_MENU_KEYS);
+const normalizeModeratorPermissions = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const normalized = {};
+  for (const [rawKey, rawPerm] of Object.entries(value)) {
+    const key = String(rawKey || '').trim().toLowerCase();
+    if (!SUPERADMIN_MENU_KEY_SET.has(key)) continue;
+    const perm = rawPerm && typeof rawPerm === 'object' ? rawPerm : {};
+    normalized[key] = {
+      view: perm.view === true,
+      edit: perm.edit === true
+    };
+  }
+  return normalized;
+};
+const RESTAURANT_CURRENCY_CODES = new Set(['uz', 'kz', 'tm', 'tj', 'kg', 'af', 'ru', 'us']);
+const GUVOHNOMA_MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024;
+const GUVOHNOMA_MAX_FILES_PER_RESTAURANT = 5;
+const GUVOHNOMA_ALLOWED_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.pdf']);
+const GUVOHNOMA_ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'application/pdf']);
+const RESTAURANT_WORKFLOW_STATUS_VALUES = new Set([
+  'new',
+  'negotiation',
+  'queue',
+  'token',
+  'store_settings',
+  'products',
+  'homonym',
+  'active',
+  'inactive'
+]);
+const RESTAURANT_AUTO_INACTIVE_DAYS = 30;
+const normalizeRestaurantCurrencyCode = (value, fallback = 'uz') => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (RESTAURANT_CURRENCY_CODES.has(normalized)) return normalized;
+  const normalizedFallback = String(fallback || '').trim().toLowerCase();
+  return RESTAURANT_CURRENCY_CODES.has(normalizedFallback) ? normalizedFallback : 'uz';
+};
+const parseRestaurantWorkflowStatus = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return null;
+  return RESTAURANT_WORKFLOW_STATUS_VALUES.has(normalized) ? normalized : null;
+};
+const normalizeRestaurantWorkflowStatus = (value, fallback = 'new') => {
+  const parsed = parseRestaurantWorkflowStatus(value);
+  if (parsed) return parsed;
+  const fallbackParsed = parseRestaurantWorkflowStatus(fallback);
+  return fallbackParsed || 'new';
+};
+let activityTypesSchemaReady = false;
+let activityTypesSchemaPromise = null;
+let billingSettingsSchemaReady = false;
+let billingSettingsSchemaPromise = null;
+let restaurantCurrencySchemaReady = false;
+let restaurantCurrencySchemaPromise = null;
+let restaurantAdminCommentSchemaReady = false;
+let restaurantAdminCommentSchemaPromise = null;
+let restaurantWorkflowSchemaReady = false;
+let restaurantWorkflowSchemaPromise = null;
+let restaurantGuvohnomaSchemaReady = false;
+let restaurantGuvohnomaSchemaPromise = null;
+let restaurantNamePolicyReady = false;
+let restaurantNamePolicyPromise = null;
+let globalProductsSchemaReady = false;
+let globalProductsSchemaPromise = null;
+let aiProvidersSchemaReady = false;
+let aiProvidersSchemaPromise = null;
+let aiUsageSchemaReady = false;
+let aiUsageSchemaPromise = null;
+let organizationExpensesSchemaReady = false;
+let organizationExpensesSchemaPromise = null;
+let founderProfilesSchemaReady = false;
+let founderProfilesSchemaPromise = null;
+const GLOBAL_PRODUCT_MAX_IMAGES = 5;
+const GLOBAL_PRODUCT_AI_OUTPUT_SIZE = 1024;
+const GLOBAL_PRODUCT_AI_MAX_SOURCE_BYTES = 12 * 1024 * 1024;
+const GEMINI_IMAGE_MODEL_CANDIDATES = [
+  process.env.GEMINI_IMAGE_MODEL,
+  'gemini-2.5-flash-image',
+  'gemini-3.1-flash-image-preview',
+  'gemini-3-pro-image-preview',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash'
+].filter(Boolean);
+const GEMINI_TEXT_MODEL_CANDIDATES = [
+  process.env.GEMINI_TEXT_MODEL,
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-flash-latest'
+].filter(Boolean);
+const OPENAI_IMAGE_MODEL_CANDIDATES = [
+  process.env.OPENAI_IMAGE_MODEL,
+  'gpt-image-1.5',
+  'gpt-image-1',
+  'gpt-image-1-mini'
+].filter(Boolean);
+const OPENAI_TEXT_MODEL_CANDIDATES = [
+  process.env.OPENAI_TEXT_MODEL,
+  'gpt-4.1-mini',
+  'gpt-4.1',
+  'gpt-4o-mini'
+].filter(Boolean);
+const OPENROUTER_IMAGE_MODEL_CANDIDATES = [
+  process.env.OPENROUTER_IMAGE_MODEL,
+  'minimax/minimax-m2.5:free',
+  'google/gemini-2.5-flash-image',
+  'black-forest-labs/flux.2-flex'
+].filter(Boolean);
+const OPENROUTER_TEXT_MODEL_CANDIDATES = [
+  process.env.OPENROUTER_TEXT_MODEL,
+  'stepfun/step-3.5-flash:free',
+  'openai/gpt-4.1-mini',
+  'google/gemini-2.5-flash'
+].filter(Boolean);
+const uploadsDir = process.env.UPLOADS_DIR
+  ? path.resolve(process.env.UPLOADS_DIR)
+  : path.join(__dirname, '../../uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+const guvohnomaUploadsDir = path.join(uploadsDir, 'guvohnoma');
+fs.mkdirSync(guvohnomaUploadsDir, { recursive: true });
+const uploadPublicPrefix = '/uploads/';
+const copyLocalUploadAssetIfPossible = async (rawUrl) => {
+  const normalized = String(rawUrl || '').trim();
+  if (!normalized || !normalized.startsWith(uploadPublicPrefix)) return normalized;
+  const sourceRelative = normalized.slice(uploadPublicPrefix.length);
+  if (!sourceRelative || sourceRelative.includes('..')) return normalized;
+  const sourcePath = path.resolve(uploadsDir, sourceRelative);
+  if (!sourcePath.startsWith(path.resolve(uploadsDir))) return normalized;
+  try {
+    await fs.promises.access(sourcePath);
+  } catch {
+    return normalized;
+  }
+  const ext = path.extname(sourcePath) || '.bin';
+  const nextName = `copy-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+  const targetPath = path.resolve(uploadsDir, nextName);
+  await fs.promises.copyFile(sourcePath, targetPath);
+  return `${uploadPublicPrefix}${nextName}`;
+};
+
+const copyProductImageBundle = async (productRow) => {
+  const nextImageUrl = await copyLocalUploadAssetIfPossible(productRow.image_url);
+  const nextThumbUrl = await copyLocalUploadAssetIfPossible(productRow.thumb_url);
+  const sourceImages = Array.isArray(productRow.product_images) ? productRow.product_images : [];
+  const nextProductImages = [];
+  for (const sourceImage of sourceImages) {
+    const copied = await copyLocalUploadAssetIfPossible(sourceImage);
+    if (copied) nextProductImages.push(copied);
+  }
+
+  const sourceSizeOptions = Array.isArray(productRow.size_options) ? productRow.size_options : [];
+  const nextSizeOptions = [];
+  for (const variant of sourceSizeOptions) {
+    const nextVariant = (variant && typeof variant === 'object') ? { ...variant } : variant;
+    if (nextVariant && typeof nextVariant === 'object') {
+      if (nextVariant.image_url) {
+        nextVariant.image_url = await copyLocalUploadAssetIfPossible(nextVariant.image_url);
+      }
+      if (Array.isArray(nextVariant.product_images)) {
+        const variantImages = [];
+        for (const variantImage of nextVariant.product_images) {
+          const copied = await copyLocalUploadAssetIfPossible(variantImage);
+          if (copied) variantImages.push(copied);
+        }
+        nextVariant.product_images = variantImages;
+      }
+    }
+    nextSizeOptions.push(nextVariant);
+  }
+
+  return {
+    image_url: nextImageUrl || null,
+    thumb_url: nextThumbUrl || null,
+    product_images: nextProductImages,
+    size_options: nextSizeOptions
+  };
+};
+
+const DEFAULT_ACTIVITY_TYPES = [
+  'Ресторан',
+  'Одежда',
+  'Хозяйственные товары',
+  'Канцтовары',
+  'Бытовая техника',
+  'Детская одежда',
+  'Цветочные',
+  'Продуктовый магазин'
+];
+const AI_PROVIDER_TYPES = new Set(['gemini', 'openai', 'openrouter', 'replicate', 'cloudflare', 'pollinations', 'custom']);
+const AI_PROVIDER_OPERATIONS = new Set(['image_generate', 'image_process', 'text_generate']);
+const FOUNDERS_ACCESS_PASSWORD = String(process.env.FOUNDERS_ACCESS_PASSWORD || '01012026').trim();
+const FOUNDER_SHARE_CONFIG = [
+  {
+    key: 'admin',
+    name: 'Admin',
+    order_percent: 10,
+    reservation_percent: 80,
+    module_shares: {
+      orders: 10,
+      reservations: 80,
+      delivery: 0,
+      ads: 0,
+      superapp: 0
+    }
+  },
+  {
+    key: 'davron',
+    name: 'Davron',
+    order_percent: 50,
+    reservation_percent: 10,
+    module_shares: {
+      orders: 50,
+      reservations: 10,
+      delivery: 0,
+      ads: 0,
+      superapp: 0
+    }
+  },
+  {
+    key: 'mirzaolim',
+    name: 'Mirzaolim',
+    order_percent: 40,
+    reservation_percent: 10,
+    module_shares: {
+      orders: 40,
+      reservations: 10,
+      delivery: 0,
+      ads: 0,
+      superapp: 0
+    }
+  }
+];
+const FOUNDERS_MODULE_DEFINITIONS = [
+  {
+    key: 'orders',
+    label: 'Заказы',
+    patterns: [`%за заказ #%`]
+  },
+  {
+    key: 'reservations',
+    label: 'Бронирования',
+    patterns: [`%за бронь #%`, `%за бронирование #%`]
+  },
+  {
+    key: 'delivery',
+    label: 'Доставки',
+    patterns: [`%за доставк%`, `%доставка%`, `%delivery%`]
+  },
+  {
+    key: 'ads',
+    label: 'Рекламы',
+    patterns: [`%реклам%`, `%advert%`, `%ads%`]
+  },
+  {
+    key: 'superapp',
+    label: 'Superapp',
+    patterns: [`%superapp%`, `%super app%`, `%суперапп%`, `%супер апп%`]
+  }
+];
+const FOUNDERS_MODULE_LABEL_MAP = Object.fromEntries(
+  FOUNDERS_MODULE_DEFINITIONS.map((item) => [item.key, item.label])
+);
+const FOUNDER_CONFIG_BY_KEY = Object.fromEntries(
+  FOUNDER_SHARE_CONFIG.map((item) => [item.key, item])
+);
+const normalizeFounderKey = (value) => String(value || '').trim().toLowerCase();
+const normalizeFounderPhotoUrl = (value) => {
+  const normalized = String(value || '').trim();
+  if (!normalized) return null;
+  if (
+    normalized.startsWith('/uploads/')
+    || /^https?:\/\//i.test(normalized)
+    || /^data:image\//i.test(normalized)
+  ) {
+    return normalized;
+  }
+  return null;
+};
+const getFounderModuleSharePercent = (founderKey, moduleKey) => {
+  const founder = FOUNDER_CONFIG_BY_KEY[String(founderKey || '').trim().toLowerCase()];
+  if (!founder) return 0;
+  const shares = founder.module_shares || {};
+  const value = Number(shares[moduleKey]);
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
+};
+const DEFAULT_ORGANIZATION_EXPENSE_CATEGORIES = [
+  { code: 'ads_general', name_ru: 'Реклама', name_uz: 'Reklama' },
+  { code: 'banners', name_ru: 'Баннеры', name_uz: 'Bannerlar' },
+  { code: 'flyers', name_ru: 'Флаеры и листовки', name_uz: 'Flyer va varaqalar' },
+  { code: 'tax', name_ru: 'Налог', name_uz: 'Soliq' },
+  { code: 'zakat', name_ru: 'Закат', name_uz: 'Zakot' },
+  { code: 'call_center', name_ru: 'Колл центр', name_uz: 'Koll-markaz' },
+  { code: 'instagram_target', name_ru: 'Таргет инстаграм', name_uz: 'Instagram target' },
+  { code: 'video_editing', name_ru: 'Видеомонтаж', name_uz: 'Videomontaj' },
+  { code: 'ai_agents_purchase', name_ru: 'Покупка ИИ агентов', name_uz: 'AI agentlar xaridi' },
+  { code: 'ai_tokens', name_ru: 'ИИ токены для генерации фото и текста', name_uz: 'Foto va matn generatsiyasi uchun AI tokenlar' },
+  { code: 'salary', name_ru: 'Оплата труда', name_uz: 'Mehnat haqi' },
+  { code: 'utilities', name_ru: 'Коммунальные расходы', name_uz: 'Kommunal xarajatlar' },
+  { code: 'office_rent', name_ru: 'Аренда офиса', name_uz: 'Ofis ijarasi' },
+  { code: 'internet', name_ru: 'Интернет', name_uz: 'Internet' },
+  { code: 'server_payment', name_ru: 'Оплата за сервер', name_uz: "Server uchun to'lov" },
+  { code: 'equipment', name_ru: 'Оборудование', name_uz: 'Jihozlar' },
+  { code: 'furniture', name_ru: 'Мебель', name_uz: 'Mebel' },
+  { code: 'construction_repair', name_ru: 'Строительство и ремонт', name_uz: "Qurilish va ta'mirlash" },
+  { code: 'transport', name_ru: 'Бензин и транспортные расходы', name_uz: "Yoqilg'i va transport xarajatlari" },
+  { code: 'travel', name_ru: 'Путишествие', name_uz: 'Sayohat' }
+];
+
+const normalizeTokenValue = (value) => {
+  const normalized = value ? String(value).trim() : '';
+  return normalized || null;
+};
+
+const normalizeTelegramIdValue = (value) => {
+  const normalized = value === undefined || value === null ? '' : String(value).trim();
+  return normalized || null;
+};
+const normalizePreservedText = (incomingValue, previousValue, { digitsOnly = false } = {}) => {
+  const previousRaw = previousValue === undefined || previousValue === null ? '' : String(previousValue);
+  const previousNormalized = digitsOnly ? previousRaw.replace(/\D/g, '') : previousRaw.trim();
+
+  if (incomingValue === undefined || incomingValue === null) {
+    return previousNormalized;
+  }
+
+  const incomingRaw = String(incomingValue);
+  const incomingNormalized = digitsOnly ? incomingRaw.replace(/\D/g, '') : incomingRaw.trim();
+  if (!incomingNormalized) {
+    return previousNormalized;
+  }
+  return incomingNormalized;
+};
+const normalizePreservedNumber = (incomingValue, previousValue, defaultValue) => {
+  const incomingParsed = Number(incomingValue);
+  if (Number.isFinite(incomingParsed) && incomingParsed > 0) {
+    return incomingParsed;
+  }
+
+  const previousParsed = Number(previousValue);
+  if (Number.isFinite(previousParsed) && previousParsed > 0) {
+    return previousParsed;
+  }
+
+  return defaultValue;
+};
+const appendBillingSettingsHistory = async ({ before = null, after = null, userId = null, source = 'api' } = {}) => {
+  try {
+    await pool.query(`
+      INSERT INTO billing_settings_history (
+        billing_settings_id,
+        changed_by_user_id,
+        source,
+        before_data,
+        after_data
+      ) VALUES ($1, $2, $3, $4, $5)
+    `, [
+      Number(after?.id || before?.id || 1),
+      Number.isFinite(Number(userId)) ? Number(userId) : null,
+      String(source || 'api').slice(0, 64),
+      before || null,
+      after || null
+    ]);
+  } catch (error) {
+    console.warn('Append billing settings history warning:', error?.message || error);
+  }
+};
+const resolveServerReportLanguage = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'uz' ? 'uz' : 'ru';
+};
+const sendServerReportUsingBillingSettings = async ({ lang = 'ru' } = {}) => {
+  await ensureBillingSettingsSchema();
+  const settingsResult = await pool.query(`
+    SELECT superadmin_bot_token, superadmin_telegram_id, server_group_chat_id
+    FROM billing_settings
+    WHERE id = 1
+    LIMIT 1
+  `);
+  const row = settingsResult.rows[0] || {};
+  const token = normalizeTokenValue(row.superadmin_bot_token);
+  const targetChatId = normalizeTelegramIdValue(row.server_group_chat_id) || normalizeTelegramIdValue(row.superadmin_telegram_id);
+
+  if (!token) {
+    const error = new Error('CENTRAL_BOT_TOKEN_REQUIRED');
+    error.code = 'CENTRAL_BOT_TOKEN_REQUIRED';
+    throw error;
+  }
+  if (!targetChatId) {
+    const error = new Error('SERVER_GROUP_CHAT_ID_REQUIRED');
+    error.code = 'SERVER_GROUP_CHAT_ID_REQUIRED';
+    throw error;
+  }
+
+  const activeBot = getBot();
+  const activeToken = normalizeTokenValue(getActiveSuperadminBotToken());
+  const reusableBot = activeBot && activeToken === token ? activeBot : null;
+  const reportBot = reusableBot || new TelegramBot(token);
+
+  await sendServerStatsToChat(reportBot, targetChatId, {
+    reason: 'manual',
+    lang: resolveServerReportLanguage(lang)
+  });
+
+  return { targetChatId };
+};
+const SEASON_ANIMATION_MODES = new Set(['off', 'spring', 'summer', 'autumn', 'winter']);
+const normalizeCatalogAnimationSeason = (value, fallback = 'off') => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return SEASON_ANIMATION_MODES.has(normalized) ? normalized : fallback;
+};
+
+const normalizeActivityTypeId = (value) => {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+const normalizeBooleanFlag = (value, fallback = false) => {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+};
+const normalizeAiProviderType = (value, fallback = 'gemini') => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return AI_PROVIDER_TYPES.has(normalized) ? normalized : fallback;
+};
+const normalizeAiProviderName = (value) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+const normalizeAiProviderModel = (value) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+const normalizeAiProviderConfigJson = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return value;
+};
+const toAiProviderPriority = (value, fallback = 100) => {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(1, Math.min(9999, parsed));
+};
+const buildAiApiKeyMask = (value) => {
+  const token = String(value || '').trim();
+  if (!token) return '';
+  if (token.length <= 8) return `${token.slice(0, 2)}••••${token.slice(-2)}`;
+  return `${token.slice(0, 4)}••••••••${token.slice(-4)}`;
+};
+const resolveAiEncryptionKey = () => {
+  const source = String(process.env.AI_PROVIDER_ENCRYPTION_KEY || process.env.JWT_SECRET || '').trim();
+  if (!source) return null;
+  return crypto.createHash('sha256').update(source).digest();
+};
+const encryptAiSecret = (value) => {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '';
+  const key = resolveAiEncryptionKey();
+  if (!key) return '';
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(normalized, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `v1:${iv.toString('base64')}:${tag.toString('base64')}:${encrypted.toString('base64')}`;
+};
+const decryptAiSecret = (payload) => {
+  const raw = String(payload || '').trim();
+  if (!raw) return '';
+  if (!raw.startsWith('v1:')) return '';
+  const parts = raw.split(':');
+  if (parts.length !== 4) return '';
+  const key = resolveAiEncryptionKey();
+  if (!key) return '';
+  try {
+    const iv = Buffer.from(parts[1], 'base64');
+    const tag = Buffer.from(parts[2], 'base64');
+    const encrypted = Buffer.from(parts[3], 'base64');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8').trim();
+  } catch (_) {
+    return '';
+  }
+};
+const normalizeAiProviderDbRow = (row) => ({
+  id: Number(row?.id || 0),
+  name: String(row?.name || '').trim(),
+  provider_type: normalizeAiProviderType(row?.provider_type, 'gemini'),
+  image_model: String(row?.image_model || '').trim(),
+  text_model: String(row?.text_model || '').trim(),
+  is_enabled: row?.is_enabled !== false,
+  is_active: row?.is_active === true,
+  priority: toAiProviderPriority(row?.priority, 100),
+  api_key_masked: String(row?.api_key_masked || '').trim(),
+  has_api_key: Boolean(String(row?.api_key_encrypted || '').trim()),
+  config_json: normalizeAiProviderConfigJson(row?.config_json),
+  created_at: row?.created_at || null,
+  updated_at: row?.updated_at || null
+});
+const normalizeAiUsageOperation = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return AI_PROVIDER_OPERATIONS.has(normalized) ? normalized : 'image_generate';
+};
+const estimateGeminiImageCostUsd = (model) => {
+  const normalized = String(model || '').toLowerCase();
+  if (normalized.includes('gemini-2.5-flash-image')) return 0.039;
+  if (normalized.includes('gemini-3.1-flash-image-preview')) return 0.067;
+  return null;
+};
+const parseAiUsageUsdCost = (value) => {
+  if (value === null || value === undefined || value === '') return null;
+  const normalizedRaw = String(value).replace(',', '.').trim();
+  if (!normalizedRaw) return null;
+  const matched = normalizedRaw.match(/-?\d+(?:\.\d+)?/);
+  if (!matched) return null;
+  const numeric = Number(matched[0]);
+  if (!Number.isFinite(numeric) || numeric < 0) return null;
+  return Math.round(numeric * 1_000_000) / 1_000_000;
+};
+const extractAiUsageCostUsd = (payload) => {
+  if (!payload || typeof payload !== 'object') return null;
+  return parseAiUsageUsdCost(
+    payload?.usage?.cost
+    ?? payload?.usage?.total_cost
+    ?? payload?.usage?.estimated_cost
+    ?? payload?.cost
+    ?? payload?.total_cost
+    ?? payload?.estimated_cost
+    ?? payload?.meta?.cost
+    ?? payload?.meta?.estimated_cost
+  );
+};
+const resolveAiUsageCostUsd = (...candidates) => {
+  for (const candidate of candidates) {
+    const parsed = parseAiUsageUsdCost(candidate);
+    if (parsed !== null) return parsed;
+  }
+  return null;
+};
+const parseProviderTag = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return { type: '', model: '' };
+  const separator = raw.indexOf(':');
+  if (separator === -1) return { type: raw.toLowerCase(), model: '' };
+  return {
+    type: raw.slice(0, separator).trim().toLowerCase(),
+    model: raw.slice(separator + 1).trim()
+  };
+};
+const parseDateRangeFilterValue = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  return raw;
+};
+const roundMoneyValue = (value) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.round((numeric + Number.EPSILON) * 100) / 100;
+};
+const normalizeExpenseCurrencyCode = (value, fallback = 'uz') => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (/^[a-z]{2,8}$/.test(normalized)) return normalized;
+  const normalizedFallback = String(fallback || '').trim().toLowerCase();
+  if (/^[a-z]{2,8}$/.test(normalizedFallback)) return normalizedFallback;
+  return 'uz';
+};
+const normalizeExpenseCode = (value) => (
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80)
+);
+const normalizeExpenseCategoryName = (value) => (
+  String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 255)
+);
+const normalizeExpenseDescription = (value) => {
+  const normalized = String(value || '').trim();
+  return normalized ? normalized.slice(0, 3000) : null;
+};
+const distributeAmountByWeights = (amount, items = []) => {
+  const normalizedAmount = roundMoneyValue(amount);
+  if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0 || !Array.isArray(items) || items.length === 0) {
+    return new Map();
+  }
+
+  const normalizedItems = items.map((item, index) => ({
+    key: String(item?.key || '').trim().toLowerCase(),
+    weight: Math.max(0, Number(item?.weight || 0)),
+    index
+  })).filter((item) => item.key);
+
+  if (!normalizedItems.length) return new Map();
+
+  const totalWeight = normalizedItems.reduce((acc, item) => acc + item.weight, 0);
+  const fallbackWeight = totalWeight > 0 ? null : 1;
+  const divisor = totalWeight > 0 ? totalWeight : normalizedItems.length;
+
+  const allocations = new Map();
+  let distributed = 0;
+  for (let i = 0; i < normalizedItems.length; i += 1) {
+    const item = normalizedItems[i];
+    if (i === normalizedItems.length - 1) {
+      const remainder = roundMoneyValue(normalizedAmount - distributed);
+      allocations.set(item.key, remainder);
+      continue;
+    }
+    const effectiveWeight = fallbackWeight === null ? item.weight : fallbackWeight;
+    const rawShare = (normalizedAmount * effectiveWeight) / divisor;
+    const roundedShare = roundMoneyValue(rawShare);
+    allocations.set(item.key, roundedShare);
+    distributed = roundMoneyValue(distributed + roundedShare);
+  }
+  return allocations;
+};
+
+const ensureActivityTypesSchema = async () => {
+  if (activityTypesSchemaReady) return;
+  if (activityTypesSchemaPromise) {
+    await activityTypesSchemaPromise;
+    return;
+  }
+
+  activityTypesSchemaPromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS business_activity_types (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        sort_order INTEGER DEFAULT 0,
+        is_visible BOOLEAN DEFAULT true,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query('ALTER TABLE business_activity_types ADD COLUMN IF NOT EXISTS is_visible BOOLEAN DEFAULT true');
+    await pool.query('ALTER TABLE business_activity_types ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0');
+    await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS activity_type_id INTEGER');
+    await pool.query(`ALTER TABLE ad_banners ADD COLUMN IF NOT EXISTS target_activity_type_ids JSONB DEFAULT '[]'::jsonb`).catch(() => {});
+    await pool.query(`ALTER TABLE ad_banners ALTER COLUMN target_activity_type_ids SET DEFAULT '[]'::jsonb`).catch(() => {});
+    await pool.query(`UPDATE ad_banners SET target_activity_type_ids = '[]'::jsonb WHERE target_activity_type_ids IS NULL`).catch(() => {});
+    await pool.query(`ALTER TABLE ad_banners ADD COLUMN IF NOT EXISTS ad_type VARCHAR(24) DEFAULT 'banner'`).catch(() => {});
+    await pool.query(`ALTER TABLE ad_banners ALTER COLUMN ad_type SET DEFAULT 'banner'`).catch(() => {});
+    await pool.query(`UPDATE ad_banners SET ad_type = 'banner' WHERE ad_type IS NULL OR BTRIM(ad_type) = ''`).catch(() => {});
+    await ensureCheckConstraint(pool, {
+      tableName: 'ad_banners',
+      constraintName: 'ad_banners_type_check',
+      checkExpression: `ad_type IN ('banner', 'entry_popup')`
+    }).catch(() => {});
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_restaurants_activity_type_id ON restaurants(activity_type_id)');
+    await pool.query('CREATE INDEX IF NOT EXISTS idx_business_activity_types_sort_order ON business_activity_types(sort_order, id)');
+    await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS uq_business_activity_types_name_lower ON business_activity_types (LOWER(name))');
+
+    for (let i = 0; i < DEFAULT_ACTIVITY_TYPES.length; i += 1) {
+      const name = DEFAULT_ACTIVITY_TYPES[i];
+      await pool.query(
+        `INSERT INTO business_activity_types (name, sort_order, is_visible)
+         VALUES ($1, $2, true)
+         ON CONFLICT ((LOWER(name))) DO NOTHING`,
+        [name, i + 1]
+      );
+    }
+
+    activityTypesSchemaReady = true;
+  })();
+
+  try {
+    await activityTypesSchemaPromise;
+  } finally {
+    activityTypesSchemaPromise = null;
+  }
+};
+const ensureBillingSettingsSchema = async () => {
+  if (billingSettingsSchemaReady) return;
+  if (billingSettingsSchemaPromise) {
+    await billingSettingsSchemaPromise;
+    return;
+  }
+
+  billingSettingsSchemaPromise = (async () => {
+    await pool.query(`ALTER TABLE billing_settings ADD COLUMN IF NOT EXISTS catalog_animation_season VARCHAR(16) DEFAULT 'off'`).catch(() => {});
+    await pool.query(`ALTER TABLE billing_settings ALTER COLUMN catalog_animation_season SET DEFAULT 'off'`).catch(() => {});
+    await pool.query(`ALTER TABLE billing_settings ADD COLUMN IF NOT EXISTS ai_enabled BOOLEAN DEFAULT true`).catch(() => {});
+    await pool.query(`ALTER TABLE billing_settings ALTER COLUMN ai_enabled SET DEFAULT true`).catch(() => {});
+    // Controls the per-product "AI: suggest category" button in the store admin.
+    // Off by default: the automatic (statistical) suggestion always works; the AI
+    // button is opt-in and toggled here in the superadmin.
+    await pool.query(`ALTER TABLE billing_settings ADD COLUMN IF NOT EXISTS ai_category_suggest_enabled BOOLEAN DEFAULT false`).catch(() => {});
+    await pool.query(`ALTER TABLE billing_settings ALTER COLUMN ai_category_suggest_enabled SET DEFAULT false`).catch(() => {});
+    await pool.query(`UPDATE billing_settings SET ai_category_suggest_enabled = false WHERE ai_category_suggest_enabled IS NULL`).catch(() => {});
+    await pool.query(`ALTER TABLE billing_settings ADD COLUMN IF NOT EXISTS server_group_chat_id VARCHAR(64)`).catch(() => {});
+    await pool.query(`ALTER TABLE billing_settings ADD COLUMN IF NOT EXISTS server_stats_interval_ms INTEGER DEFAULT 1800000`).catch(() => {});
+    await pool.query(`ALTER TABLE billing_settings ALTER COLUMN server_stats_interval_ms SET DEFAULT 1800000`).catch(() => {});
+    await pool.query(`ALTER TABLE billing_settings ADD COLUMN IF NOT EXISTS server_railway_projects TEXT`).catch(() => {});
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS billing_settings_history (
+        id BIGSERIAL PRIMARY KEY,
+        billing_settings_id INTEGER NOT NULL,
+        changed_by_user_id INTEGER,
+        source VARCHAR(64) DEFAULT 'api',
+        before_data JSONB,
+        after_data JSONB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `).catch(() => {});
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_billing_settings_history_created_at
+      ON billing_settings_history(created_at DESC)
+    `).catch(() => {});
+    await pool.query(`
+      UPDATE billing_settings
+      SET catalog_animation_season = 'off'
+      WHERE catalog_animation_season IS NULL
+        OR BTRIM(catalog_animation_season) = ''
+        OR catalog_animation_season NOT IN ('off', 'spring', 'summer', 'autumn', 'winter')
+    `).catch(() => {});
+    await pool.query(`
+      UPDATE billing_settings
+      SET ai_enabled = true
+      WHERE ai_enabled IS NULL
+    `).catch(() => {});
+    await pool.query(`
+      UPDATE billing_settings
+      SET server_stats_interval_ms = 1800000
+      WHERE server_stats_interval_ms IS NULL
+         OR server_stats_interval_ms NOT IN (1800000, 3600000, 7200000, 10800000, 21600000, 86400000)
+    `).catch(() => {});
+    await ensureCheckConstraint(pool, {
+      tableName: 'billing_settings',
+      constraintName: 'billing_settings_catalog_animation_season_check',
+      checkExpression: `catalog_animation_season IN ('off', 'spring', 'summer', 'autumn', 'winter')`
+    }).catch(() => {});
+    await ensurePrintFormSettingsSchema();
+    billingSettingsSchemaReady = true;
+  })();
+
+  try {
+    await billingSettingsSchemaPromise;
+  } finally {
+    billingSettingsSchemaPromise = null;
+  }
+};
+const ensureAiProvidersSchema = async () => {
+  if (aiProvidersSchemaReady) return;
+  if (aiProvidersSchemaPromise) {
+    await aiProvidersSchemaPromise;
+    return;
+  }
+
+  aiProvidersSchemaPromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ai_providers (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        provider_type VARCHAR(32) NOT NULL DEFAULT 'gemini',
+        api_key_encrypted TEXT,
+        api_key_masked VARCHAR(32),
+        image_model VARCHAR(120),
+        text_model VARCHAR(120),
+        config_json JSONB DEFAULT '{}'::jsonb,
+        is_enabled BOOLEAN DEFAULT true,
+        is_active BOOLEAN DEFAULT false,
+        priority INTEGER DEFAULT 100,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`ALTER TABLE ai_providers ADD COLUMN IF NOT EXISTS provider_type VARCHAR(32) DEFAULT 'gemini'`).catch(() => {});
+    await pool.query(`ALTER TABLE ai_providers ADD COLUMN IF NOT EXISTS api_key_encrypted TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE ai_providers ADD COLUMN IF NOT EXISTS api_key_masked VARCHAR(32)`).catch(() => {});
+    await pool.query(`ALTER TABLE ai_providers ADD COLUMN IF NOT EXISTS image_model VARCHAR(120)`).catch(() => {});
+    await pool.query(`ALTER TABLE ai_providers ADD COLUMN IF NOT EXISTS text_model VARCHAR(120)`).catch(() => {});
+    await pool.query(`ALTER TABLE ai_providers ADD COLUMN IF NOT EXISTS config_json JSONB DEFAULT '{}'::jsonb`).catch(() => {});
+    await pool.query(`ALTER TABLE ai_providers ADD COLUMN IF NOT EXISTS is_enabled BOOLEAN DEFAULT true`).catch(() => {});
+    await pool.query(`ALTER TABLE ai_providers ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT false`).catch(() => {});
+    await pool.query(`ALTER TABLE ai_providers ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 100`).catch(() => {});
+    await pool.query(`ALTER TABLE ai_providers ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id) ON DELETE SET NULL`).catch(() => {});
+    await pool.query(`ALTER TABLE ai_providers ADD COLUMN IF NOT EXISTS updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL`).catch(() => {});
+    await pool.query(`ALTER TABLE ai_providers ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`).catch(() => {});
+    await pool.query(`ALTER TABLE ai_providers ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`).catch(() => {});
+    await pool.query(`
+      UPDATE ai_providers
+      SET provider_type = 'gemini'
+      WHERE provider_type IS NULL OR BTRIM(provider_type) = ''
+    `).catch(() => {});
+    await pool.query(`
+      UPDATE ai_providers
+      SET config_json = '{}'::jsonb
+      WHERE config_json IS NULL
+    `).catch(() => {});
+    await pool.query(`
+      UPDATE ai_providers
+      SET is_enabled = true
+      WHERE is_enabled IS NULL
+    `).catch(() => {});
+    await pool.query(`
+      UPDATE ai_providers
+      SET is_active = false
+      WHERE is_active IS NULL
+    `).catch(() => {});
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_ai_providers_enabled_active
+      ON ai_providers (is_enabled, is_active, priority, id)
+    `).catch(() => {});
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_providers_single_active
+      ON ai_providers ((is_active))
+      WHERE is_active = true
+    `).catch(() => {});
+    aiProvidersSchemaReady = true;
+  })();
+
+  try {
+    await aiProvidersSchemaPromise;
+  } finally {
+    aiProvidersSchemaPromise = null;
+  }
+};
+const ensureAiUsageSchema = async () => {
+  if (aiUsageSchemaReady) return;
+  if (aiUsageSchemaPromise) {
+    await aiUsageSchemaPromise;
+    return;
+  }
+
+  aiUsageSchemaPromise = (async () => {
+    await ensureAiProvidersSchema();
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ai_provider_usage (
+        id BIGSERIAL PRIMARY KEY,
+        provider_id INTEGER REFERENCES ai_providers(id) ON DELETE SET NULL,
+        provider_name VARCHAR(120),
+        provider_type VARCHAR(32),
+        operation VARCHAR(32) NOT NULL,
+        model VARCHAR(120),
+        status VARCHAR(16) NOT NULL,
+        http_status INTEGER,
+        error_code VARCHAR(120),
+        error_message TEXT,
+        estimated_cost_usd NUMERIC(12,6),
+        meta_json JSONB DEFAULT '{}'::jsonb,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_ai_provider_usage_created_at ON ai_provider_usage(created_at DESC)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_ai_provider_usage_provider_created ON ai_provider_usage(provider_id, created_at DESC)`).catch(() => {});
+    aiUsageSchemaReady = true;
+  })();
+
+  try {
+    await aiUsageSchemaPromise;
+  } finally {
+    aiUsageSchemaPromise = null;
+  }
+};
+const ensureGlobalProductsSchema = async () => {
+  if (globalProductsSchemaReady) return;
+  if (globalProductsSchemaPromise) {
+    await globalProductsSchemaPromise;
+    return;
+  }
+
+  globalProductsSchemaPromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS global_products (
+        id SERIAL PRIMARY KEY,
+        name_ru VARCHAR(255) NOT NULL,
+        name_uz VARCHAR(255),
+        description_ru TEXT,
+        description_uz TEXT,
+        image_url TEXT,
+        thumb_url TEXT,
+        product_images JSONB DEFAULT '[]'::jsonb,
+        barcode VARCHAR(120),
+        ikpu VARCHAR(64),
+        recommended_category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+        unit VARCHAR(32) DEFAULT 'шт',
+        order_step NUMERIC(10,2),
+        size_enabled BOOLEAN DEFAULT false,
+        size_options JSONB DEFAULT '[]'::jsonb,
+        is_active BOOLEAN DEFAULT true,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS name_uz VARCHAR(255)`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS description_ru TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS description_uz TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS image_url TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS thumb_url TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS product_images JSONB DEFAULT '[]'::jsonb`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS barcode VARCHAR(120)`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS ikpu VARCHAR(64)`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS recommended_category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS unit VARCHAR(32) DEFAULT 'шт'`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS order_step NUMERIC(10,2)`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS size_enabled BOOLEAN DEFAULT false`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS size_options JSONB DEFAULT '[]'::jsonb`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id) ON DELETE SET NULL`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`).catch(() => {});
+    await pool.query(`ALTER TABLE global_products ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`).catch(() => {});
+    await pool.query(`UPDATE global_products SET product_images = '[]'::jsonb WHERE product_images IS NULL`).catch(() => {});
+    await pool.query(`UPDATE global_products SET size_options = '[]'::jsonb WHERE size_options IS NULL`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_global_products_active_name ON global_products(is_active, LOWER(name_ru))`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_global_products_barcode ON global_products(barcode)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_global_products_ikpu ON global_products(ikpu)`).catch(() => {});
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_global_products_barcode_normalized
+      ON global_products ((NULLIF(REGEXP_REPLACE(COALESCE(barcode, ''), '\\D', '', 'g'), '')))
+    `).catch(() => {});
+    globalProductsSchemaReady = true;
+  })();
+
+  try {
+    await globalProductsSchemaPromise;
+  } finally {
+    globalProductsSchemaPromise = null;
+  }
+};
+const ensureOrganizationExpensesSchema = async () => {
+  if (organizationExpensesSchemaReady) return;
+  if (organizationExpensesSchemaPromise) {
+    await organizationExpensesSchemaPromise;
+    return;
+  }
+
+  organizationExpensesSchemaPromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS organization_expense_categories (
+        id SERIAL PRIMARY KEY,
+        code VARCHAR(80) UNIQUE,
+        name_ru VARCHAR(255) NOT NULL,
+        name_uz VARCHAR(255),
+        is_system BOOLEAN DEFAULT false,
+        is_active BOOLEAN DEFAULT true,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`ALTER TABLE organization_expense_categories ADD COLUMN IF NOT EXISTS code VARCHAR(80)`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expense_categories ADD COLUMN IF NOT EXISTS name_ru VARCHAR(255)`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expense_categories ADD COLUMN IF NOT EXISTS name_uz VARCHAR(255)`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expense_categories ADD COLUMN IF NOT EXISTS is_system BOOLEAN DEFAULT false`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expense_categories ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expense_categories ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id) ON DELETE SET NULL`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expense_categories ADD COLUMN IF NOT EXISTS updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expense_categories ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expense_categories ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`).catch(() => {});
+    await pool.query(`UPDATE organization_expense_categories SET name_ru = 'Статья расхода' WHERE name_ru IS NULL OR BTRIM(name_ru) = ''`).catch(() => {});
+    await pool.query(`UPDATE organization_expense_categories SET is_system = false WHERE is_system IS NULL`).catch(() => {});
+    await pool.query(`UPDATE organization_expense_categories SET is_active = true WHERE is_active IS NULL`).catch(() => {});
+    await pool.query(`UPDATE organization_expense_categories SET code = NULL WHERE code IS NOT NULL AND BTRIM(code) = ''`).catch(() => {});
+    await pool.query(`UPDATE organization_expense_categories SET code = LOWER(BTRIM(code)) WHERE code IS NOT NULL`).catch(() => {});
+    await ensureCheckConstraint(pool, {
+      tableName: 'organization_expense_categories',
+      constraintName: 'organization_expense_categories_code_format_check',
+      checkExpression: `code IS NULL OR code ~ '^[a-z0-9_]{1,80}$'`
+    }).catch(() => {});
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_organization_expense_categories_code ON organization_expense_categories(code)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_organization_expense_categories_name_ru ON organization_expense_categories(LOWER(name_ru))`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_organization_expense_categories_name_uz ON organization_expense_categories(LOWER(name_uz))`).catch(() => {});
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS organization_expenses (
+        id BIGSERIAL PRIMARY KEY,
+        category_id INTEGER NOT NULL REFERENCES organization_expense_categories(id) ON DELETE RESTRICT,
+        amount NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+        currency_code VARCHAR(12) NOT NULL DEFAULT 'uz',
+        expense_date DATE NOT NULL DEFAULT CURRENT_DATE,
+        description TEXT,
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`ALTER TABLE organization_expenses ADD COLUMN IF NOT EXISTS category_id INTEGER REFERENCES organization_expense_categories(id) ON DELETE RESTRICT`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expenses ADD COLUMN IF NOT EXISTS amount NUMERIC(14,2)`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expenses ADD COLUMN IF NOT EXISTS currency_code VARCHAR(12) DEFAULT 'uz'`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expenses ADD COLUMN IF NOT EXISTS expense_date DATE DEFAULT CURRENT_DATE`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expenses ADD COLUMN IF NOT EXISTS description TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expenses ADD COLUMN IF NOT EXISTS created_by INTEGER REFERENCES users(id) ON DELETE SET NULL`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expenses ADD COLUMN IF NOT EXISTS updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expenses ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`).catch(() => {});
+    await pool.query(`ALTER TABLE organization_expenses ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`).catch(() => {});
+    await pool.query(`UPDATE organization_expenses SET currency_code = 'uz' WHERE currency_code IS NULL OR BTRIM(currency_code) = ''`).catch(() => {});
+    await pool.query(`UPDATE organization_expenses SET currency_code = LOWER(BTRIM(currency_code)) WHERE currency_code IS NOT NULL`).catch(() => {});
+    await pool.query(`UPDATE organization_expenses SET expense_date = CURRENT_DATE WHERE expense_date IS NULL`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_organization_expenses_expense_date ON organization_expenses(expense_date DESC, id DESC)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_organization_expenses_category_date ON organization_expenses(category_id, expense_date DESC)`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_organization_expenses_currency_date ON organization_expenses(currency_code, expense_date DESC)`).catch(() => {});
+
+    for (const defaultCategory of DEFAULT_ORGANIZATION_EXPENSE_CATEGORIES) {
+      const code = normalizeExpenseCode(defaultCategory.code);
+      const nameRu = normalizeExpenseCategoryName(defaultCategory.name_ru);
+      const nameUz = normalizeExpenseCategoryName(defaultCategory.name_uz);
+      if (!code || !nameRu) continue;
+      await pool.query(
+        `
+        INSERT INTO organization_expense_categories (
+          code,
+          name_ru,
+          name_uz,
+          is_system,
+          is_active
+        )
+        VALUES ($1, $2, $3, true, true)
+        ON CONFLICT (code)
+        DO UPDATE SET
+          name_ru = EXCLUDED.name_ru,
+          name_uz = EXCLUDED.name_uz,
+          is_system = true,
+          is_active = true,
+          updated_at = CURRENT_TIMESTAMP
+        `,
+        [code, nameRu, nameUz || null]
+      );
+    }
+
+    organizationExpensesSchemaReady = true;
+  })();
+
+  try {
+    await organizationExpensesSchemaPromise;
+  } finally {
+    organizationExpensesSchemaPromise = null;
+  }
+};
+const ensureFounderProfilesSchema = async () => {
+  if (founderProfilesSchemaReady) return;
+  if (founderProfilesSchemaPromise) {
+    await founderProfilesSchemaPromise;
+    return;
+  }
+
+  founderProfilesSchemaPromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS founder_profiles (
+        founder_key VARCHAR(80) PRIMARY KEY,
+        photo_url TEXT,
+        updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`ALTER TABLE founder_profiles ADD COLUMN IF NOT EXISTS founder_key VARCHAR(80)`).catch(() => {});
+    await pool.query(`ALTER TABLE founder_profiles ADD COLUMN IF NOT EXISTS photo_url TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE founder_profiles ADD COLUMN IF NOT EXISTS updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL`).catch(() => {});
+    await pool.query(`ALTER TABLE founder_profiles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`).catch(() => {});
+    await pool.query(`UPDATE founder_profiles SET founder_key = LOWER(BTRIM(founder_key)) WHERE founder_key IS NOT NULL`).catch(() => {});
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_founder_profiles_key ON founder_profiles(founder_key)`).catch(() => {});
+    founderProfilesSchemaReady = true;
+  })();
+
+  try {
+    await founderProfilesSchemaPromise;
+  } finally {
+    founderProfilesSchemaPromise = null;
+  }
+};
+const normalizeLogoDisplayMode = (value, fallback = 'square') => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'horizontal' ? 'horizontal' : fallback;
+};
+const UI_THEME_VALUES = new Set([
+  'classic',
+  'modern',
+  'talablar_blue',
+  'mint_fresh',
+  'sunset_pop',
+  'berry_blast',
+  'violet_wave',
+  'rainbow',
+  'verdant_glass',
+  'golden_crust',
+  'light_gray'
+]);
+const normalizeUiTheme = (value, fallback = 'classic') => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (UI_THEME_VALUES.has(normalized)) return normalized;
+  const normalizedFallback = String(fallback || '').trim().toLowerCase();
+  return UI_THEME_VALUES.has(normalizedFallback) ? normalizedFallback : 'classic';
+};
+
+const normalizePhoneValue = (value) => {
+  const raw = value === undefined || value === null ? '' : String(value).trim().replace(/\s+/g, '');
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, '');
+  if (!digits) return null;
+  return `+${digits}`;
+};
+const parseFlexibleAmount = (value, fallback = 0) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : fallback;
+  const normalized = String(value).trim().replace(/\s+/g, '').replace(',', '.');
+  const parsed = Number.parseFloat(normalized);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+const MAX_RESTAURANT_ADMIN_COMMENT_LENGTH = 2000;
+const RESTAURANT_ADMIN_CHECKLIST_CODES = new Set([
+  'call_completed',
+  'meeting_completed',
+  'products_added',
+  'has_improvement_suggestions',
+  'telegram_token_issue',
+  'customers_not_adding'
+]);
+const normalizeRestaurantAdminComment = (value) => {
+  const normalized = value === undefined || value === null ? '' : String(value).trim();
+  if (!normalized) return null;
+  return normalized.slice(0, MAX_RESTAURANT_ADMIN_COMMENT_LENGTH);
+};
+const normalizeRestaurantAdminChecklist = (value) => {
+  const source = Array.isArray(value) ? value : [];
+  const uniqueCodes = [];
+  const seen = new Set();
+
+  for (const rawCode of source) {
+    const code = String(rawCode || '').trim();
+    if (!code || !RESTAURANT_ADMIN_CHECKLIST_CODES.has(code) || seen.has(code)) continue;
+    seen.add(code);
+    uniqueCodes.push(code);
+  }
+
+  return uniqueCodes;
+};
+const toOptionalTrimmedText = (value) => (
+  value === undefined || value === null ? '' : String(value).trim()
+);
+const normalizeGlobalProductNameKey = (value) => (
+  toOptionalTrimmedText(value)
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+);
+const normalizeBarcodeValue = (value) => String(value || '').replace(/\D/g, '').slice(0, 120);
+const findGlobalProductByBarcode = async (barcode, excludeId = null) => {
+  const normalizedBarcode = normalizeBarcodeValue(barcode);
+  if (!normalizedBarcode) return null;
+
+  const hasExcludeId = Number.isFinite(excludeId) && excludeId > 0;
+  const params = hasExcludeId ? [normalizedBarcode, excludeId] : [normalizedBarcode];
+  const exclusionSql = hasExcludeId ? 'AND gp.id <> $2' : '';
+  const duplicateResult = await pool.query(
+    `
+      SELECT gp.id, gp.name_ru
+      FROM global_products gp
+      WHERE NULLIF(REGEXP_REPLACE(COALESCE(gp.barcode, ''), '\\D', '', 'g'), '') = $1
+      ${exclusionSql}
+      LIMIT 1
+    `,
+    params
+  );
+  return duplicateResult.rows?.[0] || null;
+};
+const normalizePositivePrice = (value, fallback = null) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  const normalized = String(value).trim().replace(/\s+/g, '').replace(',', '.');
+  const parsed = Number.parseFloat(normalized);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.round(parsed);
+};
+const normalizeGlobalProductImages = (value, maxCount = GLOBAL_PRODUCT_MAX_IMAGES) => {
+  let source = value;
+  if (typeof source === 'string') {
+    try {
+      source = JSON.parse(source);
+    } catch (error) {
+      source = [];
+    }
+  }
+  if (!Array.isArray(source)) return [];
+
+  const normalized = [];
+  for (const entry of source) {
+    let imageUrl = '';
+    let thumbUrl = '';
+    if (typeof entry === 'string') {
+      imageUrl = entry.trim();
+    } else if (entry && typeof entry === 'object') {
+      imageUrl = toOptionalTrimmedText(entry.url || entry.image_url);
+      thumbUrl = toOptionalTrimmedText(entry.thumb_url || entry.thumbUrl);
+    }
+    if (!imageUrl) continue;
+    normalized.push({
+      url: imageUrl,
+      ...(thumbUrl ? { thumb_url: thumbUrl } : {})
+    });
+    if (normalized.length >= maxCount) break;
+  }
+  return normalized;
+};
+const normalizeGlobalProductVariantOptions = (value) => {
+  let source = value;
+  if (typeof source === 'string') {
+    try {
+      source = JSON.parse(source);
+    } catch (error) {
+      source = source
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+  }
+  if (!Array.isArray(source)) return [];
+
+  const unique = new Set();
+  const normalized = [];
+  for (const item of source) {
+    let name = '';
+    let descriptionRu = '';
+    let descriptionUz = '';
+    let price = null;
+    let barcode = '';
+    let imageUrl = '';
+    let thumbUrl = '';
+    let variantImages = [];
+
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      name = toOptionalTrimmedText(item.name || item.value || item.label);
+      descriptionRu = toOptionalTrimmedText(item.description_ru || item.descriptionRu).slice(0, 1500);
+      descriptionUz = toOptionalTrimmedText(item.description_uz || item.descriptionUz).slice(0, 1500);
+      price = normalizePositivePrice(item.price, null);
+      barcode = toOptionalTrimmedText(item.barcode).slice(0, 120);
+      variantImages = normalizeGlobalProductImages(item.product_images, 4);
+      const fallbackImageUrl = toOptionalTrimmedText(item.image_url || item.imageUrl);
+      const fallbackThumbUrl = toOptionalTrimmedText(item.thumb_url || item.thumbUrl);
+      if (variantImages.length === 0 && fallbackImageUrl) {
+        variantImages.push({
+          url: fallbackImageUrl,
+          ...(fallbackThumbUrl ? { thumb_url: fallbackThumbUrl } : {})
+        });
+      }
+      imageUrl = variantImages[0]?.url || fallbackImageUrl;
+      thumbUrl = variantImages[0]?.thumb_url || fallbackThumbUrl;
+    } else {
+      name = toOptionalTrimmedText(item);
+    }
+
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (unique.has(key)) continue;
+    unique.add(key);
+
+    normalized.push({
+      name,
+      description_ru: descriptionRu,
+      description_uz: descriptionUz,
+      price,
+      barcode,
+      image_url: imageUrl || '',
+      thumb_url: thumbUrl || '',
+      product_images: variantImages
+    });
+    if (normalized.length >= 20) break;
+  }
+  return normalized;
+};
+
+const buildGlobalProductAiFilename = () => {
+  const stamp = Date.now();
+  const randomPart = Math.round(Math.random() * 1e9);
+  return `global-product-ai-${stamp}-${randomPart}.webp`;
+};
+
+const saveGlobalProductAiImage = async (buffer) => {
+  const filename = buildGlobalProductAiFilename();
+  const filePath = path.join(uploadsDir, filename);
+  await fs.promises.writeFile(filePath, buffer);
+  return `/uploads/${filename}`;
+};
+
+const resolveSameOriginHosts = () => {
+  const hosts = new Set();
+  const candidates = [process.env.FRONTEND_URL, process.env.BACKEND_URL, process.env.TELEGRAM_WEB_APP_URL];
+  for (const candidate of candidates) {
+    const raw = String(candidate || '').trim();
+    if (!raw) continue;
+    try {
+      hosts.add(String(new URL(raw).host || '').toLowerCase());
+    } catch (_) {
+      // ignore malformed env urls
+    }
+  }
+  return hosts;
+};
+
+const GLOBAL_PRODUCT_AI_ALLOWED_HOSTS = resolveSameOriginHosts();
+
+const isPrivateOrBlockedHost = (hostname) => {
+  const host = String(hostname || '').trim().toLowerCase();
+  if (!host) return true;
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+  if (host.endsWith('.local')) return true;
+
+  const ipv4Match = host.match(/^(\d{1,3})(?:\.(\d{1,3})){3}$/);
+  if (!ipv4Match) return false;
+  const parts = host.split('.').map((part) => Number.parseInt(part, 10));
+  if (parts.some((part) => !Number.isFinite(part) || part < 0 || part > 255)) return true;
+  if (parts[0] === 10) return true;
+  if (parts[0] === 127) return true;
+  if (parts[0] === 192 && parts[1] === 168) return true;
+  if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+  if (parts[0] === 169 && parts[1] === 254) return true;
+  return false;
+};
+
+const resolveGlobalProductAiImageSourceUrl = (rawValue, req) => {
+  const value = String(rawValue || '').trim();
+  if (!value) return '';
+  const requestHost = String(req.get('host') || '').toLowerCase();
+  if (value.startsWith('/uploads/')) {
+    return `${req.protocol}://${requestHost}${value}`;
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch (_) {
+    return '';
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+
+  const host = String(parsed.host || '').toLowerCase();
+  if (!host) return '';
+  if (host === requestHost) return parsed.toString();
+  if (GLOBAL_PRODUCT_AI_ALLOWED_HOSTS.has(host)) return parsed.toString();
+  if (isPrivateOrBlockedHost(parsed.hostname)) return '';
+  return parsed.toString();
+};
+
+const downloadGlobalProductAiSourceImage = async (sourceUrl) => {
+  const response = await axios.get(sourceUrl, {
+    responseType: 'arraybuffer',
+    timeout: 45000,
+    maxContentLength: GLOBAL_PRODUCT_AI_MAX_SOURCE_BYTES,
+    validateStatus: (status) => status >= 200 && status < 400
+  });
+  const contentType = String(response.headers?.['content-type'] || '').toLowerCase();
+  if (!contentType.startsWith('image/')) {
+    throw new Error('Источник должен быть изображением');
+  }
+  const buffer = Buffer.from(response.data || []);
+  if (!buffer.length) throw new Error('Источник изображения пустой');
+  if (buffer.length > GLOBAL_PRODUCT_AI_MAX_SOURCE_BYTES) {
+    throw new Error('Изображение слишком большое');
+  }
+  return buffer;
+};
+
+const extractGeminiInlineImageBuffer = (payload) => {
+  const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+  for (const candidate of candidates) {
+    const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
+    for (const part of parts) {
+      const inlineData = part?.inlineData || part?.inline_data;
+      const data = inlineData?.data;
+      if (!data || typeof data !== 'string') continue;
+      try {
+        const buffer = Buffer.from(data, 'base64');
+        if (buffer.length > 0) return buffer;
+      } catch (_) {
+        // ignore malformed chunk
+      }
+    }
+  }
+  return null;
+};
+
+const extractGeminiTextContent = (payload) => {
+  const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+  for (const candidate of candidates) {
+    const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
+    for (const part of parts) {
+      const text = String(part?.text || '').trim();
+      if (text) return text;
+    }
+  }
+  return '';
+};
+
+const extractFirstJsonObject = (value) => {
+  const source = String(value || '').trim();
+  if (!source) return null;
+  const firstBrace = source.indexOf('{');
+  const lastBrace = source.lastIndexOf('}');
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) return null;
+  const candidate = source.slice(firstBrace, lastBrace + 1);
+  try {
+    return JSON.parse(candidate);
+  } catch (_) {
+    return null;
+  }
+};
+
+const resolveGeminiApiKeyFromEnv = () => String(
+  process.env.GEMINI_API_KEY
+  || process.env.GOOGLE_GEMINI_API_KEY
+  || process.env.GOOGLE_AI_API_KEY
+  || ''
+).trim();
+const resolveOpenAiApiKeyFromEnv = () => String(
+  process.env.OPENAI_API_KEY
+  || process.env.OPENAI_KEY
+  || ''
+).trim();
+const resolveOpenRouterApiKeyFromEnv = () => String(
+  process.env.OPENROUTER_API_KEY
+  || process.env.OPENROUTER_KEY
+  || ''
+).trim();
+const resolvePollinationsApiKeyFromEnv = () => String(
+  process.env.POLLINATIONS_API_KEY
+  || ''
+).trim();
+const isLikelyOpenRouterApiKey = (value) => String(value || '').trim().toLowerCase().startsWith('sk-or-');
+const buildPollinationsHeaders = (apiKey = '') => {
+  const normalizedKey = String(apiKey || '').trim();
+  const headers = {
+    'User-Agent': 'TalablarBot/1.0 (+https://talablar.up.railway.app)'
+  };
+  if (normalizedKey) {
+    headers.Authorization = `Bearer ${normalizedKey}`;
+  }
+  return headers;
+};
+const buildModelCandidates = (items = []) => {
+  const seen = new Set();
+  const normalized = [];
+  for (const rawItem of items) {
+    const item = rawItem === undefined || rawItem === null ? '' : String(rawItem).trim();
+    const key = item.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(item);
+  }
+  return normalized;
+};
+const formatAiProviderTestError = (error, providerType = 'gemini') => {
+  const statusCode = Number(error?.response?.status || 0);
+  const payloadMessage = (() => {
+    const data = error?.response?.data;
+    if (!data) return '';
+    if (typeof data === 'string') return data;
+    if (typeof data?.error === 'string') return data.error;
+    if (typeof data?.error?.message === 'string') return data.error.message;
+    if (Array.isArray(data?.errors) && data.errors.length) {
+      const firstError = data.errors[0];
+      if (typeof firstError === 'string') return firstError;
+      if (typeof firstError?.message === 'string') return firstError.message;
+    }
+    if (typeof data?.message === 'string') return data.message;
+    return '';
+  })();
+  const rawMessage = String(
+    payloadMessage
+    || error?.message
+    || 'ошибка токена/модели'
+  ).trim();
+  const normalized = rawMessage.toLowerCase();
+  const isUnauthorized = [401, 403].includes(statusCode)
+    || normalized.includes('401')
+    || normalized.includes('403')
+    || normalized.includes('unauthorized')
+    || normalized.includes('forbidden');
+
+  if (!isUnauthorized) {
+    return rawMessage.slice(0, 240);
+  }
+
+  if (providerType === 'pollinations') {
+    return 'Недействительный API key Pollinations (401/403). Проверьте ключ или очистите поле API key и повторите тест.';
+  }
+  if (providerType === 'openrouter') {
+    return 'Недействительный API key OpenRouter (401/403) или модель недоступна для вашего тарифа.';
+  }
+  return 'Недействительный API key (401/403) или модель недоступна для вашего ключа.';
+};
+
+const getActiveAiProviderRuntimeConfig = async () => {
+  await ensureAiProvidersSchema();
+  const result = await pool.query(`
+    SELECT id, name, provider_type, api_key_encrypted, api_key_masked,
+           image_model, text_model, config_json, is_enabled, is_active, priority
+    FROM ai_providers
+    WHERE is_enabled = true AND is_active = true
+    ORDER BY priority ASC, id ASC
+    LIMIT 1
+  `);
+  const row = result.rows[0];
+  if (!row) return null;
+  const normalized = normalizeAiProviderDbRow(row);
+  const apiKey = decryptAiSecret(row.api_key_encrypted);
+  return {
+    ...normalized,
+    api_key: apiKey
+  };
+};
+
+const buildAiProviderRef = (provider) => {
+  if (!provider) return null;
+  return {
+    id: Number(provider.id || 0) || null,
+    name: String(provider.name || '').trim() || 'AI Provider',
+    provider_type: normalizeAiProviderType(provider.provider_type, 'gemini')
+  };
+};
+
+const resolveGeminiRuntimeConfig = async () => {
+  const activeProvider = await getActiveAiProviderRuntimeConfig();
+  if (activeProvider && activeProvider.provider_type === 'gemini' && activeProvider.api_key) {
+    const imageCandidates = [
+      normalizeAiProviderModel(activeProvider.image_model),
+      ...GEMINI_IMAGE_MODEL_CANDIDATES
+    ].filter(Boolean);
+    const textCandidates = [
+      normalizeAiProviderModel(activeProvider.text_model),
+      ...GEMINI_TEXT_MODEL_CANDIDATES
+    ].filter(Boolean);
+    return {
+      apiKey: activeProvider.api_key,
+      imageModelCandidates: [...new Set(imageCandidates)],
+      textModelCandidates: [...new Set(textCandidates)],
+      providerRef: buildAiProviderRef(activeProvider)
+    };
+  }
+  if (activeProvider) {
+    return {
+      apiKey: '',
+      imageModelCandidates: GEMINI_IMAGE_MODEL_CANDIDATES,
+      textModelCandidates: GEMINI_TEXT_MODEL_CANDIDATES,
+      providerRef: buildAiProviderRef(activeProvider)
+    };
+  }
+
+  const apiKey = resolveGeminiApiKeyFromEnv();
+  return {
+    apiKey,
+    imageModelCandidates: GEMINI_IMAGE_MODEL_CANDIDATES,
+    textModelCandidates: GEMINI_TEXT_MODEL_CANDIDATES,
+    providerRef: apiKey
+      ? { id: null, name: 'Railway ENV Gemini', provider_type: 'gemini' }
+      : null
+  };
+};
+const resolveOpenAiRuntimeConfig = async () => {
+  const activeProvider = await getActiveAiProviderRuntimeConfig();
+  if (activeProvider && activeProvider.provider_type === 'openai' && activeProvider.api_key) {
+    const imageCandidates = [
+      normalizeAiProviderModel(activeProvider.image_model),
+      ...OPENAI_IMAGE_MODEL_CANDIDATES
+    ].filter(Boolean);
+    const textCandidates = [
+      normalizeAiProviderModel(activeProvider.text_model),
+      ...OPENAI_TEXT_MODEL_CANDIDATES
+    ].filter(Boolean);
+    return {
+      apiKey: activeProvider.api_key,
+      imageModelCandidates: [...new Set(imageCandidates)],
+      textModelCandidates: [...new Set(textCandidates)],
+      providerRef: buildAiProviderRef(activeProvider)
+    };
+  }
+  if (activeProvider) {
+    return {
+      apiKey: '',
+      imageModelCandidates: OPENAI_IMAGE_MODEL_CANDIDATES,
+      textModelCandidates: OPENAI_TEXT_MODEL_CANDIDATES,
+      providerRef: buildAiProviderRef(activeProvider)
+    };
+  }
+
+  const apiKey = resolveOpenAiApiKeyFromEnv();
+  return {
+    apiKey,
+    imageModelCandidates: OPENAI_IMAGE_MODEL_CANDIDATES,
+    textModelCandidates: OPENAI_TEXT_MODEL_CANDIDATES,
+    providerRef: apiKey
+      ? { id: null, name: 'Railway ENV OpenAI', provider_type: 'openai' }
+      : null
+  };
+};
+const resolveOpenRouterRuntimeConfig = async () => {
+  const activeProvider = await getActiveAiProviderRuntimeConfig();
+  if (activeProvider && activeProvider.provider_type === 'openrouter' && activeProvider.api_key) {
+    const imageCandidates = [
+      normalizeAiProviderModel(activeProvider.image_model),
+      ...OPENROUTER_IMAGE_MODEL_CANDIDATES
+    ].filter(Boolean);
+    const textCandidates = [
+      normalizeAiProviderModel(activeProvider.text_model),
+      ...OPENROUTER_TEXT_MODEL_CANDIDATES
+    ].filter(Boolean);
+    return {
+      apiKey: activeProvider.api_key,
+      imageModelCandidates: [...new Set(imageCandidates)],
+      textModelCandidates: [...new Set(textCandidates)],
+      providerRef: buildAiProviderRef(activeProvider)
+    };
+  }
+  if (activeProvider) {
+    return {
+      apiKey: '',
+      imageModelCandidates: OPENROUTER_IMAGE_MODEL_CANDIDATES,
+      textModelCandidates: OPENROUTER_TEXT_MODEL_CANDIDATES,
+      providerRef: buildAiProviderRef(activeProvider)
+    };
+  }
+
+  const apiKey = resolveOpenRouterApiKeyFromEnv();
+  return {
+    apiKey,
+    imageModelCandidates: OPENROUTER_IMAGE_MODEL_CANDIDATES,
+    textModelCandidates: OPENROUTER_TEXT_MODEL_CANDIDATES,
+    providerRef: apiKey
+      ? { id: null, name: 'Railway ENV OpenRouter', provider_type: 'openrouter' }
+      : null
+  };
+};
+const resolvePollinationsRuntimeConfig = async () => {
+  const defaultImageCandidates = ['flux', 'flux-2-dev', 'zimage', ''];
+  const defaultTextCandidates = ['openai', 'gemini-fast', 'mistral', ''];
+  const activeProvider = await getActiveAiProviderRuntimeConfig();
+  if (activeProvider && activeProvider.provider_type === 'pollinations') {
+    const imageCandidates = buildModelCandidates([
+      normalizeAiProviderModel(activeProvider.image_model),
+      ...defaultImageCandidates
+    ]);
+    const textCandidates = buildModelCandidates([
+      normalizeAiProviderModel(activeProvider.text_model),
+      ...defaultTextCandidates
+    ]);
+    return {
+      apiKey: activeProvider.api_key || '',
+      imageModelCandidates: imageCandidates,
+      textModelCandidates: textCandidates,
+      providerRef: buildAiProviderRef(activeProvider)
+    };
+  }
+
+  const apiKey = resolvePollinationsApiKeyFromEnv();
+  return {
+    apiKey,
+    imageModelCandidates: buildModelCandidates(defaultImageCandidates),
+    textModelCandidates: buildModelCandidates(defaultTextCandidates),
+    providerRef: apiKey
+      ? { id: null, name: 'Railway ENV Pollinations', provider_type: 'pollinations' }
+      : { id: null, name: 'Pollinations', provider_type: 'pollinations' }
+  };
+};
+
+const logAiUsageEvent = async ({
+  providerRef = null,
+  operation = 'image_generate',
+  model = '',
+  status = 'success',
+  httpStatus = null,
+  errorCode = '',
+  errorMessage = '',
+  estimatedCostUsd = null,
+  meta = {}
+} = {}) => {
+  try {
+    await ensureAiUsageSchema();
+    const safeOperation = normalizeAiUsageOperation(operation);
+    const safeStatus = status === 'failed' ? 'failed' : 'success';
+    const normalizedModel = normalizeAiProviderModel(model);
+    const normalizedErrorCode = String(errorCode || '').trim().slice(0, 120) || null;
+    const normalizedErrorMessage = String(errorMessage || '').trim().slice(0, 700) || null;
+    const normalizedMeta = normalizeAiProviderConfigJson(meta);
+    const numericCost = Number.isFinite(Number(estimatedCostUsd))
+      ? Math.max(0, Number(estimatedCostUsd))
+      : null;
+    await pool.query(`
+      INSERT INTO ai_provider_usage (
+        provider_id, provider_name, provider_type, operation, model, status,
+        http_status, error_code, error_message, estimated_cost_usd, meta_json
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+    `, [
+      providerRef?.id || null,
+      String(providerRef?.name || '').trim() || null,
+      String(providerRef?.provider_type || '').trim() || null,
+      safeOperation,
+      normalizedModel || null,
+      safeStatus,
+      Number.isFinite(Number(httpStatus)) ? Number(httpStatus) : null,
+      normalizedErrorCode,
+      normalizedErrorMessage,
+      numericCost,
+      JSON.stringify(normalizedMeta)
+    ]);
+  } catch (error) {
+    console.warn('AI usage logging warning:', error?.message || error);
+  }
+};
+
+const isAiFeatureEnabled = async () => {
+  await ensureBillingSettingsSchema();
+  const result = await pool.query(
+    'SELECT ai_enabled FROM billing_settings WHERE id = 1 LIMIT 1'
+  );
+  if (!result.rows.length) return true;
+  return result.rows[0]?.ai_enabled !== false;
+};
+
+const ensureAiFeatureEnabled = async (res) => {
+  try {
+    const enabled = await isAiFeatureEnabled();
+    if (enabled) return true;
+    res.status(403).json({
+      error: 'AI функции временно отключены в настройках супер-админки',
+      code: 'ai_disabled'
+    });
+    return false;
+  } catch (error) {
+    console.error('AI feature flag check error:', error?.message || error);
+    return true;
+  }
+};
+
+const generateGlobalProductImageWithGemini = async (prompt, { runtimeOverride = null } = {}) => {
+  const runtime = runtimeOverride || await resolveGeminiRuntimeConfig();
+  const apiKey = runtime.apiKey;
+  if (!apiKey) return null;
+
+  let lastError = null;
+  for (const model of runtime.imageModelCandidates) {
+    try {
+      const response = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }
+        },
+        {
+          timeout: 90000,
+          maxBodyLength: 6 * 1024 * 1024
+        }
+      );
+      const imageBuffer = extractGeminiInlineImageBuffer(response.data);
+      if (imageBuffer) {
+        const estimatedCostUsd = resolveAiUsageCostUsd(
+          extractAiUsageCostUsd(response.data),
+          estimateGeminiImageCostUsd(model)
+        );
+        return {
+          buffer: imageBuffer,
+          provider: `gemini:${model}`,
+          model,
+          providerRef: runtime.providerRef || { id: null, name: 'Gemini', provider_type: 'gemini' },
+          estimatedCostUsd
+        };
+      }
+      lastError = new Error('Gemini не вернул изображение');
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError) throw lastError;
+  return null;
+};
+
+const generateGlobalProductTextWithGemini = async (prompt, { expectJson = false, runtimeOverride = null } = {}) => {
+  const runtime = runtimeOverride || await resolveGeminiRuntimeConfig();
+  const apiKey = runtime.apiKey;
+  if (!apiKey) return null;
+
+  let lastError = null;
+  for (const model of runtime.textModelCandidates) {
+    try {
+      const response = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.35,
+            ...(expectJson ? { responseMimeType: 'application/json' } : {})
+          }
+        },
+        {
+          timeout: 65000,
+          maxBodyLength: 4 * 1024 * 1024
+        }
+      );
+      const text = extractGeminiTextContent(response.data);
+      if (text) {
+        return {
+          text,
+          provider: `gemini:${model}`,
+          model,
+          providerRef: runtime.providerRef || { id: null, name: 'Gemini', provider_type: 'gemini' },
+          estimatedCostUsd: extractAiUsageCostUsd(response.data)
+        };
+      }
+      lastError = new Error('Gemini не вернул текст');
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastError) throw lastError;
+  return null;
+};
+
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+const buildOpenRouterHeaders = (apiKey) => {
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json'
+  };
+  const referer = String(
+    process.env.OPENROUTER_HTTP_REFERER
+    || process.env.OPENROUTER_SITE_URL
+    || process.env.APP_URL
+    || ''
+  ).trim();
+  const title = String(process.env.OPENROUTER_APP_TITLE || 'Talablar Superadmin').trim();
+  if (referer) headers['HTTP-Referer'] = referer;
+  if (title) headers['X-Title'] = title;
+  return headers;
+};
+const parseImageBufferFromDataUrl = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const match = raw.match(/^data:image\/[a-zA-Z0-9.+-]+;base64,(.+)$/);
+  if (!match || !match[1]) return null;
+  try {
+    const buffer = Buffer.from(match[1], 'base64');
+    return buffer.length > 0 ? buffer : null;
+  } catch (_) {
+    return null;
+  }
+};
+const parseImageBufferFromBase64String = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (raw.length < 80) return null;
+  if (/[^A-Za-z0-9+/=]/.test(raw)) return null;
+  try {
+    const buffer = Buffer.from(raw, 'base64');
+    return buffer.length > 0 ? buffer : null;
+  } catch (_) {
+    return null;
+  }
+};
+const extractOpenRouterImageCandidates = (payload) => {
+  const urls = [];
+  const addCandidate = (value) => {
+    const normalized = String(value || '').trim();
+    if (!normalized) return;
+    urls.push(normalized);
+  };
+
+  const firstChoice = payload?.choices?.[0] || {};
+  const message = firstChoice?.message || {};
+  const images = Array.isArray(message?.images) ? message.images : [];
+  images.forEach((image) => {
+    addCandidate(image?.image_url?.url || image?.imageUrl?.url || image?.url || image?.b64_json || image?.base64 || '');
+  });
+
+  const rawContent = message?.content;
+  if (Array.isArray(rawContent)) {
+    rawContent.forEach((item) => {
+      addCandidate(
+        item?.image_url?.url
+        || item?.image_url
+        || item?.url
+        || item?.b64_json
+        || item?.base64
+        || item?.image?.url
+        || ''
+      );
+    });
+  } else if (rawContent && typeof rawContent === 'object') {
+    addCandidate(
+      rawContent?.image_url?.url
+      || rawContent?.image_url
+      || rawContent?.url
+      || rawContent?.b64_json
+      || rawContent?.base64
+      || ''
+    );
+  }
+
+  const topLevelData = Array.isArray(payload?.data) ? payload.data : [];
+  topLevelData.forEach((item) => {
+    addCandidate(item?.url || item?.b64_json || item?.base64 || '');
+  });
+
+  const topLevelImages = Array.isArray(payload?.images) ? payload.images : [];
+  topLevelImages.forEach((item) => {
+    addCandidate(item?.url || item?.image_url?.url || item?.b64_json || item?.base64 || '');
+  });
+
+  const unique = [];
+  const seen = new Set();
+  urls.forEach((item) => {
+    const key = item.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    unique.push(item);
+  });
+  return unique;
+};
+
+const generateGlobalProductImageWithOpenAI = async (prompt, { runtimeOverride = null } = {}) => {
+  const runtime = runtimeOverride || await resolveOpenAiRuntimeConfig();
+  const apiKey = runtime.apiKey;
+  if (!apiKey) return null;
+
+  let lastError = null;
+  for (const model of runtime.imageModelCandidates) {
+    try {
+      const response = await axios.post(
+        'https://api.openai.com/v1/images/generations',
+        {
+          model,
+          prompt,
+          size: `${GLOBAL_PRODUCT_AI_OUTPUT_SIZE}x${GLOBAL_PRODUCT_AI_OUTPUT_SIZE}`,
+          response_format: 'b64_json'
+        },
+        {
+          timeout: 90000,
+          maxBodyLength: 6 * 1024 * 1024,
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      const b64Image = String(response?.data?.data?.[0]?.b64_json || '').trim();
+      if (b64Image) {
+        const imageBuffer = Buffer.from(b64Image, 'base64');
+        if (imageBuffer.length > 0) {
+          return {
+            buffer: imageBuffer,
+            provider: `openai:${model}`,
+            model,
+            providerRef: runtime.providerRef || { id: null, name: 'OpenAI', provider_type: 'openai' },
+            estimatedCostUsd: extractAiUsageCostUsd(response.data)
+          };
+        }
+      }
+      lastError = new Error('OpenAI не вернул изображение');
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastError) throw lastError;
+  return null;
+};
+
+const generateGlobalProductTextWithOpenAI = async (prompt, { expectJson = false, runtimeOverride = null } = {}) => {
+  const runtime = runtimeOverride || await resolveOpenAiRuntimeConfig();
+  const apiKey = runtime.apiKey;
+  if (!apiKey) return null;
+
+  let lastError = null;
+  for (const model of runtime.textModelCandidates) {
+    try {
+      const response = await axios.post(
+        'https://api.openai.com/v1/chat/completions',
+        {
+          model,
+          messages: [
+            {
+              role: 'system',
+              content: expectJson
+                ? 'Return only valid JSON with no markdown and no comments.'
+                : 'You are a helpful catalog assistant.'
+            },
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.35,
+          ...(expectJson ? { response_format: { type: 'json_object' } } : {})
+        },
+        {
+          timeout: 65000,
+          maxBodyLength: 4 * 1024 * 1024,
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      const text = String(response?.data?.choices?.[0]?.message?.content || '').trim();
+      if (text) {
+        return {
+          text,
+          provider: `openai:${model}`,
+          model,
+          providerRef: runtime.providerRef || { id: null, name: 'OpenAI', provider_type: 'openai' },
+          estimatedCostUsd: extractAiUsageCostUsd(response.data)
+        };
+      }
+      lastError = new Error('OpenAI не вернул текст');
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastError) throw lastError;
+  return null;
+};
+
+const generateGlobalProductImageWithOpenRouter = async (prompt, { runtimeOverride = null } = {}) => {
+  const runtime = runtimeOverride || await resolveOpenRouterRuntimeConfig();
+  const apiKey = runtime.apiKey;
+  if (!apiKey) return null;
+
+  let lastError = null;
+  for (const model of runtime.imageModelCandidates) {
+    try {
+      const response = await axios.post(
+        `${OPENROUTER_BASE_URL}/chat/completions`,
+        {
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          modalities: ['image'],
+          image_config: {
+            aspect_ratio: '1:1',
+            image_size: '1K'
+          },
+          stream: false
+        },
+        {
+          timeout: 90000,
+          maxBodyLength: 6 * 1024 * 1024,
+          headers: buildOpenRouterHeaders(apiKey)
+        }
+      );
+      const imageCandidates = extractOpenRouterImageCandidates(response?.data);
+      const estimatedCostUsd = extractAiUsageCostUsd(response.data);
+      for (const candidate of imageCandidates) {
+        const imageUrl = String(candidate || '').trim();
+        if (!imageUrl) continue;
+        const dataBuffer = parseImageBufferFromDataUrl(imageUrl);
+        if (dataBuffer) {
+          return {
+            buffer: dataBuffer,
+            provider: `openrouter:${model}`,
+            model,
+            providerRef: runtime.providerRef || { id: null, name: 'OpenRouter', provider_type: 'openrouter' },
+            estimatedCostUsd
+          };
+        }
+        const rawBase64Buffer = parseImageBufferFromBase64String(imageUrl);
+        if (rawBase64Buffer) {
+          return {
+            buffer: rawBase64Buffer,
+            provider: `openrouter:${model}`,
+            model,
+            providerRef: runtime.providerRef || { id: null, name: 'OpenRouter', provider_type: 'openrouter' },
+            estimatedCostUsd
+          };
+        }
+        if (/^https?:\/\//i.test(imageUrl)) {
+          const imageResponse = await axios.get(imageUrl, {
+            responseType: 'arraybuffer',
+            timeout: 90000
+          });
+          const httpBuffer = Buffer.from(imageResponse.data || '');
+          if (httpBuffer.length > 0) {
+            return {
+              buffer: httpBuffer,
+              provider: `openrouter:${model}`,
+              model,
+              providerRef: runtime.providerRef || { id: null, name: 'OpenRouter', provider_type: 'openrouter' },
+              estimatedCostUsd
+            };
+          }
+        }
+      }
+      lastError = new Error('OpenRouter не вернул изображение');
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastError) throw lastError;
+  return null;
+};
+
+const generateGlobalProductTextWithOpenRouter = async (prompt, { expectJson = false, runtimeOverride = null } = {}) => {
+  const runtime = runtimeOverride || await resolveOpenRouterRuntimeConfig();
+  const apiKey = runtime.apiKey;
+  if (!apiKey) return null;
+
+  let lastError = null;
+  for (const model of runtime.textModelCandidates) {
+    try {
+      const response = await axios.post(
+        `${OPENROUTER_BASE_URL}/chat/completions`,
+        {
+          model,
+          messages: [
+            {
+              role: 'system',
+              content: expectJson
+                ? 'Return only valid JSON with no markdown and no comments.'
+                : 'You are a helpful catalog assistant.'
+            },
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.35,
+          ...(expectJson ? { response_format: { type: 'json_object' } } : {})
+        },
+        {
+          timeout: 65000,
+          maxBodyLength: 4 * 1024 * 1024,
+          headers: buildOpenRouterHeaders(apiKey)
+        }
+      );
+      const rawContent = response?.data?.choices?.[0]?.message?.content;
+      const text = Array.isArray(rawContent)
+        ? rawContent
+          .map((item) => (typeof item === 'string' ? item : String(item?.text || '').trim()))
+          .join('\n')
+          .trim()
+        : String(rawContent || '').trim();
+      if (text) {
+        return {
+          text,
+          provider: `openrouter:${model}`,
+          model,
+          providerRef: runtime.providerRef || { id: null, name: 'OpenRouter', provider_type: 'openrouter' },
+          estimatedCostUsd: extractAiUsageCostUsd(response.data)
+        };
+      }
+      lastError = new Error('OpenRouter не вернул текст');
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastError) throw lastError;
+  return null;
+};
+const generateGlobalProductTextWithPollinations = async (prompt, { expectJson = false, runtimeOverride = null } = {}) => {
+  const runtime = runtimeOverride || await resolvePollinationsRuntimeConfig();
+  let textPrompt = String(prompt || '').trim();
+  if (!textPrompt) return null;
+  if (expectJson) {
+    textPrompt = [
+      textPrompt,
+      'Return only valid JSON. No markdown. No comments.'
+    ].join('\n');
+  }
+
+  let lastError = null;
+  const modelCandidates = Array.isArray(runtime.textModelCandidates) && runtime.textModelCandidates.length
+    ? runtime.textModelCandidates
+    : [''];
+  const keyCandidates = buildModelCandidates(runtime.apiKey ? [runtime.apiKey, ''] : ['']);
+  for (const model of modelCandidates) {
+    for (const keyCandidate of keyCandidates) {
+      try {
+        const params = new URLSearchParams();
+        if (model) params.set('model', model);
+        if (keyCandidate) params.set('key', keyCandidate);
+        const query = params.toString();
+        const url = `https://gen.pollinations.ai/text/${encodeURIComponent(textPrompt)}${query ? `?${query}` : ''}`;
+        const response = await axios.get(url, {
+          timeout: 45000,
+          maxContentLength: 2 * 1024 * 1024,
+          headers: {
+            Accept: 'text/plain,application/json;q=0.9,*/*;q=0.8',
+            ...buildPollinationsHeaders(keyCandidate)
+          },
+          validateStatus: (status) => status >= 200 && status < 400
+        });
+
+        let text = '';
+        if (typeof response.data === 'string') {
+          text = response.data.trim();
+        } else if (response.data && typeof response.data === 'object') {
+          text = String(
+            response.data.text
+            || response.data.response
+            || response.data.output
+            || ''
+          ).trim();
+        }
+        if (text) {
+          return {
+            text,
+            provider: model ? `pollinations:${model}` : 'pollinations',
+            model: model || '',
+            providerRef: runtime.providerRef || { id: null, name: 'Pollinations', provider_type: 'pollinations' }
+          };
+        }
+        lastError = new Error('Pollinations не вернул текст');
+      } catch (error) {
+        lastError = error;
+        const statusCode = Number(error?.response?.status || 0);
+        const canRetryWithoutKey = Boolean(keyCandidate) && [401, 403].includes(statusCode);
+        if (canRetryWithoutKey) {
+          continue;
+        }
+      }
+    }
+  }
+
+  if (lastError) throw lastError;
+  return null;
+};
+
+const normalizeCatalogText = (value, maxLength = 3000) => String(value || '')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .slice(0, maxLength);
+
+const buildLocalGlobalProductTextFallback = ({ nameRu, nameUz }) => {
+  const normalizedNameRu = normalizeCatalogText(nameRu || nameUz, 255);
+  const normalizedNameUz = normalizeCatalogText(nameUz || nameRu, 255);
+  return {
+    name_ru: normalizedNameRu,
+    name_uz: normalizedNameUz,
+    description_ru: normalizeCatalogText(
+      normalizedNameRu
+        ? `${normalizedNameRu} — качественный товар для ежедневного использования и продажи в магазине.`
+        : 'Качественный товар для ежедневного использования и продажи в магазине.',
+      3000
+    ),
+    description_uz: normalizeCatalogText(
+      normalizedNameUz
+        ? `${normalizedNameUz} — kundalik foydalanish va savdo uchun mos sifatli mahsulot.`
+        : "Kundalik foydalanish va savdo uchun mos sifatli mahsulot.",
+      3000
+    ),
+    variant_descriptions: [],
+    provider: 'local-template',
+    providerRef: null
+  };
+};
+
+const buildVariantDescriptionsFallback = (variantNames = []) => (
+  variantNames.map((variantNameRaw) => {
+    const variantName = normalizeCatalogText(variantNameRaw, 120);
+    if (!variantName) return null;
+    return {
+      name: variantName,
+      description_ru: normalizeCatalogText(
+        `${variantName} — вариант товара с отличающимися характеристиками.`,
+        1500
+      ),
+      description_uz: normalizeCatalogText(
+        `${variantName} — mahsulotning xususiyatlari farqlanuvchi varianti.`,
+        1500
+      )
+    };
+  }).filter(Boolean)
+);
+
+const resolveVariantDescriptions = (rawVariants, variantNames = []) => {
+  const fallback = buildVariantDescriptionsFallback(variantNames);
+  if (!Array.isArray(rawVariants) || rawVariants.length === 0) return fallback;
+
+  const byName = new Map();
+  for (const item of rawVariants) {
+    if (!item || typeof item !== 'object') continue;
+    const rawName = item.name ?? item.variant_name ?? item.title ?? '';
+    const normalizedName = normalizeCatalogText(rawName, 120);
+    if (!normalizedName) continue;
+    byName.set(normalizedName.toLowerCase(), {
+      name: normalizedName,
+      description_ru: normalizeCatalogText(item.description_ru || '', 1500),
+      description_uz: normalizeCatalogText(item.description_uz || '', 1500)
+    });
+  }
+
+  return variantNames.map((variantNameRaw) => {
+    const variantName = normalizeCatalogText(variantNameRaw, 120);
+    if (!variantName) return null;
+    const matched = byName.get(variantName.toLowerCase());
+    const fallbackItem = fallback.find((entry) => entry.name.toLowerCase() === variantName.toLowerCase());
+    return {
+      name: variantName,
+      description_ru: normalizeCatalogText(
+        matched?.description_ru || fallbackItem?.description_ru || '',
+        1500
+      ),
+      description_uz: normalizeCatalogText(
+        matched?.description_uz || fallbackItem?.description_uz || '',
+        1500
+      )
+    };
+  }).filter(Boolean);
+};
+
+const generateGlobalProductLocalizedText = async ({ nameRu, nameUz, variants = [] }) => {
+  const normalizedRu = normalizeCatalogText(nameRu, 255);
+  const normalizedUz = normalizeCatalogText(nameUz, 255);
+  const normalizedVariantNames = Array.isArray(variants)
+    ? variants
+      .map((variant) => {
+        if (typeof variant === 'string') return normalizeCatalogText(variant, 120);
+        return normalizeCatalogText(variant?.name || variant?.variant_name || variant?.title || '', 120);
+      })
+      .filter(Boolean)
+    : [];
+  if (!normalizedRu && !normalizedUz) {
+    throw new Error('Укажите хотя бы одно название товара (RU или UZ)');
+  }
+
+  const prompt = [
+    'Ты ассистент каталога товаров.',
+    'Категории могут быть любыми: еда, цветы, зоотовары, одежда, техника, аксессуары и т.д.',
+    'Верни только валидный JSON без markdown, без комментариев.',
+    'Схема JSON строго:',
+    '{"name_ru":"...","name_uz":"...","description_ru":"...","description_uz":"...","variant_descriptions":[{"name":"...","description_ru":"...","description_uz":"..."}]}',
+    `name_ru_input: "${normalizedRu || ''}"`,
+    `name_uz_input: "${normalizedUz || ''}"`,
+    `variant_names_input_json: ${JSON.stringify(normalizedVariantNames)}`,
+    'Требования:',
+    '1) Если name_ru_input пуст, переведи из name_uz_input на русский и заполни name_ru.',
+    '2) Если name_uz_input пуст, переведи из name_ru_input на узбекский (латиница) и заполни name_uz.',
+    '3) Если поле уже заполнено, не меняй смысл названия и оставь его близким к исходному.',
+    '4) Сформируй description_ru и description_uz: 1-2 коротких предложения, по делу, без эмодзи, без рекламных слоганов, без цен.',
+    '5) Тексты должны быть универсальными под любой тип товара, не только под блюда и еду.',
+    '6) Если переданы variant_names_input_json, верни variant_descriptions той же длины и с теми же name.',
+    '7) Для каждого варианта дай отдельные description_ru и description_uz (коротко, по сути, без цен).'
+  ].join('\n');
+
+  try {
+    let result = null;
+    try {
+      result = await generateGlobalProductTextWithGemini(prompt, { expectJson: true });
+    } catch (error) {
+      console.warn('Gemini text generation fallback:', error?.message || error);
+    }
+    if (!result?.text) {
+      try {
+        result = await generateGlobalProductTextWithOpenAI(prompt, { expectJson: true });
+      } catch (error) {
+        console.warn('OpenAI text generation fallback:', error?.message || error);
+      }
+    }
+    if (!result?.text) {
+      try {
+        result = await generateGlobalProductTextWithOpenRouter(prompt, { expectJson: true });
+      } catch (error) {
+        console.warn('OpenRouter text generation fallback:', error?.message || error);
+      }
+    }
+    if (!result?.text) {
+      try {
+        result = await generateGlobalProductTextWithPollinations(prompt, { expectJson: true });
+      } catch (error) {
+        console.warn('Pollinations text generation fallback:', error?.message || error);
+      }
+    }
+    if (!result?.text) {
+      const fallback = buildLocalGlobalProductTextFallback({ nameRu: normalizedRu, nameUz: normalizedUz });
+      return {
+        ...fallback,
+        variant_descriptions: buildVariantDescriptionsFallback(normalizedVariantNames)
+      };
+    }
+    const parsed = extractFirstJsonObject(result.text);
+    if (!parsed || typeof parsed !== 'object') {
+      const fallback = buildLocalGlobalProductTextFallback({ nameRu: normalizedRu, nameUz: normalizedUz });
+      return {
+        ...fallback,
+        variant_descriptions: buildVariantDescriptionsFallback(normalizedVariantNames)
+      };
+    }
+    const outputNameRu = normalizeCatalogText(parsed.name_ru || normalizedRu || normalizedUz, 255);
+    const outputNameUz = normalizeCatalogText(parsed.name_uz || normalizedUz || normalizedRu, 255);
+    const fallback = buildLocalGlobalProductTextFallback({ nameRu: outputNameRu, nameUz: outputNameUz });
+    const variantDescriptions = resolveVariantDescriptions(parsed.variant_descriptions, normalizedVariantNames);
+
+    return {
+      name_ru: outputNameRu || fallback.name_ru,
+      name_uz: outputNameUz || fallback.name_uz,
+      description_ru: normalizeCatalogText(parsed.description_ru || fallback.description_ru, 3000),
+      description_uz: normalizeCatalogText(parsed.description_uz || fallback.description_uz, 3000),
+      variant_descriptions: variantDescriptions,
+      provider: result.provider || 'gemini',
+      model: String(result.model || '').trim(),
+      providerRef: result.providerRef || null,
+      estimatedCostUsd: resolveAiUsageCostUsd(result.estimatedCostUsd)
+    };
+  } catch (error) {
+    console.warn('Global product description generation fallback:', error?.message || error);
+    const fallback = buildLocalGlobalProductTextFallback({ nameRu: normalizedRu, nameUz: normalizedUz });
+    return {
+      ...fallback,
+      variant_descriptions: buildVariantDescriptionsFallback(normalizedVariantNames)
+    };
+  }
+};
+
+// Mode 2 (AI): pick the best matching leaf category for a product name.
+// Reuses the same provider fallback chain as the description generator.
+// `categories` is an array of { id, path } (path = localized full category path).
+const suggestProductCategoryWithAI = async ({ nameRu, nameUz, categories = [] }) => {
+  const normalizedRu = normalizeCatalogText(nameRu, 255);
+  const normalizedUz = normalizeCatalogText(nameUz, 255);
+  const list = (Array.isArray(categories) ? categories : [])
+    .filter((c) => c && Number.isFinite(Number(c.id)) && String(c.path || '').trim())
+    .slice(0, 300);
+  if ((!normalizedRu && !normalizedUz) || list.length === 0) return null;
+
+  const allowedIds = new Set(list.map((c) => Number(c.id)));
+  const prompt = [
+    'Ты ассистент каталога товаров интернет-магазина.',
+    'Задача: по названию товара выбрать наиболее подходящую категорию ТОЛЬКО из списка ниже.',
+    'Учитывай смысл товара, бренд, назначение, рынок и контекст.',
+    'Верни строго валидный JSON без markdown и комментариев по схеме:',
+    '{"primary_id": <number>, "alternative_id": <number|null>}',
+    'primary_id — id самой точной категории из списка.',
+    'alternative_id — id второй по близости категории из списка (или null, если нет).',
+    'Используй только id из списка. Не придумывай новые id.',
+    `Название товара (RU): "${normalizedRu || ''}"`,
+    `Название товара (UZ): "${normalizedUz || ''}"`,
+    'Список категорий (формат "id: путь"):',
+    list.map((c) => `${Number(c.id)}: ${String(c.path).slice(0, 200)}`).join('\n')
+  ].join('\n');
+
+  let result = null;
+  try { result = await generateGlobalProductTextWithGemini(prompt, { expectJson: true }); } catch (e) { /* fallback below */ }
+  if (!result?.text) { try { result = await generateGlobalProductTextWithOpenAI(prompt, { expectJson: true }); } catch (e) { /* fallback */ } }
+  if (!result?.text) { try { result = await generateGlobalProductTextWithOpenRouter(prompt, { expectJson: true }); } catch (e) { /* fallback */ } }
+  if (!result?.text) { try { result = await generateGlobalProductTextWithPollinations(prompt, { expectJson: true }); } catch (e) { /* fallback */ } }
+  if (!result?.text) return null;
+
+  const parsed = extractFirstJsonObject(result.text);
+  if (!parsed || typeof parsed !== 'object') return null;
+  const toAllowedId = (raw) => {
+    const id = Number.parseInt(raw, 10);
+    return Number.isInteger(id) && allowedIds.has(id) ? id : null;
+  };
+  const primaryId = toAllowedId(parsed.primary_id ?? parsed.primaryId ?? parsed.category_id);
+  let alternativeId = toAllowedId(parsed.alternative_id ?? parsed.alternativeId);
+  if (alternativeId && alternativeId === primaryId) alternativeId = null;
+  if (!primaryId && !alternativeId) return null;
+  return { primary_id: primaryId, alternative_id: alternativeId };
+};
+
+const generateGlobalProductImageWithPollinations = async (prompt, { runtimeOverride = null } = {}) => {
+  const runtime = runtimeOverride || await resolvePollinationsRuntimeConfig();
+  const negativePrompt = [
+    'multiple objects',
+    'shelf',
+    'store interior',
+    'table setting',
+    'busy background',
+    'text',
+    'logo',
+    'watermark',
+    'person',
+    'hands',
+    'ui card',
+    'product card template',
+    'poster'
+  ].join(', ');
+
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const modelCandidates = Array.isArray(runtime.imageModelCandidates) && runtime.imageModelCandidates.length
+    ? runtime.imageModelCandidates
+    : ['flux', 'flux-2-dev', 'zimage', ''];
+  const keyCandidates = buildModelCandidates(runtime.apiKey ? [runtime.apiKey, ''] : ['']);
+  let lastError = null;
+
+  for (const model of modelCandidates) {
+    for (const keyCandidate of keyCandidates) {
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const seed = Date.now() + Math.floor(Math.random() * 1000000);
+        const requestProfiles = [
+          { withSize: true, withLegacyHints: true },
+          { withSize: true, withLegacyHints: false },
+          { withSize: false, withLegacyHints: false }
+        ];
+        let shouldRetryAttempt = false;
+        let shouldBreakKeyLoop = false;
+
+        for (let profileIndex = 0; profileIndex < requestProfiles.length; profileIndex += 1) {
+          const profile = requestProfiles[profileIndex];
+          const params = new URLSearchParams();
+          if (profile.withSize) {
+            params.set('width', String(GLOBAL_PRODUCT_AI_OUTPUT_SIZE));
+            params.set('height', String(GLOBAL_PRODUCT_AI_OUTPUT_SIZE));
+            params.set('seed', String(seed));
+          }
+          if (profile.withLegacyHints) {
+            params.set('nologo', 'true');
+            params.set('safe', 'true');
+            params.set('enhance', 'true');
+            params.set('negative', negativePrompt);
+          }
+          if (model) params.set('model', model);
+          if (keyCandidate) params.set('key', keyCandidate);
+
+          const url = `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?${params.toString()}`;
+
+          try {
+            const response = await axios.get(url, {
+              responseType: 'arraybuffer',
+              timeout: 25000,
+              maxContentLength: GLOBAL_PRODUCT_AI_MAX_SOURCE_BYTES,
+              maxRedirects: 3,
+              headers: {
+                Accept: 'image/*,*/*;q=0.8',
+                ...buildPollinationsHeaders(keyCandidate)
+              },
+              validateStatus: (status) => status >= 200 && status < 400
+            });
+            const contentType = String(response.headers?.['content-type'] || '').toLowerCase();
+            if (!contentType.startsWith('image/')) {
+              throw new Error(`Pollinations вернул неподдерживаемый content-type: ${contentType || 'unknown'}`);
+            }
+            const buffer = Buffer.from(response.data || []);
+            if (!buffer.length) throw new Error('Pollinations вернул пустой ответ');
+            return {
+              buffer,
+              provider: model ? `pollinations:${model}` : 'pollinations',
+              model: model || '',
+              providerRef: runtime.providerRef || { id: null, name: 'Pollinations', provider_type: 'pollinations' }
+            };
+          } catch (error) {
+            lastError = error;
+            const statusCode = Number(error?.response?.status || 0);
+            const hasMoreProfiles = profileIndex < requestProfiles.length - 1;
+
+            if (statusCode === 400 && hasMoreProfiles) {
+              // Pollinations API может отвергать часть query-параметров; пробуем более совместимый профиль.
+              continue;
+            }
+            const canRetryWithoutKey = Boolean(keyCandidate) && [401, 403].includes(statusCode);
+            if (canRetryWithoutKey) {
+              shouldBreakKeyLoop = true;
+              break;
+            }
+            const canRetry = attempt < 2 && [408, 425, 429, 500, 502, 503, 504].includes(statusCode);
+            if (canRetry) {
+              shouldRetryAttempt = true;
+            }
+            break;
+          }
+        }
+        if (shouldBreakKeyLoop) {
+          break;
+        }
+        if (shouldRetryAttempt) {
+          await wait(1200 * attempt);
+          continue;
+        }
+        break;
+      }
+    }
+  }
+
+  if (lastError) throw lastError;
+  throw new Error('Pollinations не вернул изображение');
+};
+
+const escapeXml = (value) => String(value || '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+
+const generateGlobalProductPlaceholderImage = async (name) => {
+  const title = escapeXml(String(name || '').trim().slice(0, 44) || 'Product');
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${GLOBAL_PRODUCT_AI_OUTPUT_SIZE}" height="${GLOBAL_PRODUCT_AI_OUTPUT_SIZE}" viewBox="0 0 ${GLOBAL_PRODUCT_AI_OUTPUT_SIZE} ${GLOBAL_PRODUCT_AI_OUTPUT_SIZE}">
+      <defs>
+        <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#f8fafc" />
+          <stop offset="100%" stop-color="#e2e8f0" />
+        </linearGradient>
+        <linearGradient id="obj1" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#fef3c7" />
+          <stop offset="100%" stop-color="#fdba74" />
+        </linearGradient>
+        <linearGradient id="obj2" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#bfdbfe" />
+          <stop offset="100%" stop-color="#60a5fa" />
+        </linearGradient>
+      </defs>
+      <rect width="100%" height="100%" fill="url(#bg)" />
+      <ellipse cx="512" cy="760" rx="250" ry="44" fill="rgba(15,23,42,0.16)" />
+      <rect x="346" y="290" width="332" height="428" rx="52" fill="url(#obj1)" stroke="#b45309" stroke-width="8"/>
+      <rect x="434" y="238" width="156" height="76" rx="24" fill="#f59e0b" stroke="#b45309" stroke-width="8"/>
+      <rect x="392" y="356" width="240" height="106" rx="24" fill="rgba(255,255,255,0.86)"/>
+      <rect x="396" y="520" width="232" height="156" rx="20" fill="url(#obj2)" stroke="#2563eb" stroke-width="6"/>
+      <circle cx="512" cy="598" r="34" fill="#dbeafe" />
+      <rect x="412" y="846" width="200" height="22" rx="11" fill="#cbd5e1"/>
+      <text x="512" y="905" fill="#334155" text-anchor="middle" font-size="44" font-family="Arial, sans-serif">${title}</text>
+    </svg>
+  `;
+  const buffer = await sharp(Buffer.from(svg)).png().toBuffer();
+  return { buffer, provider: 'placeholder-svg' };
+};
+
+const normalizeAiCategoryContextPath = (value) => {
+  if (!Array.isArray(value)) return [];
+  const unique = new Set();
+  const normalized = [];
+  for (const item of value) {
+    const clean = String(item || '').replace(/\s+/g, ' ').trim().slice(0, 84);
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (unique.has(key)) continue;
+    unique.add(key);
+    normalized.push(clean);
+    if (normalized.length >= 8) break;
+  }
+  return normalized;
+};
+
+const generateGlobalProductImageByName = async (name, { categoryContextPath = [] } = {}) => {
+  const cleanName = String(name || '').trim().slice(0, 180);
+  if (!cleanName) throw new Error('Укажите название товара для генерации');
+  const contextPath = normalizeAiCategoryContextPath(categoryContextPath);
+  const contextHint = contextPath.length ? contextPath.join(' > ') : '';
+
+  const prompt = [
+    `Professional studio product photo of "${cleanName}"`,
+    contextHint ? `catalog category context: "${contextHint}"` : '',
+    contextHint ? 'if product name is ambiguous, strictly choose the object variant that matches this category context' : '',
+    contextHint ? 'example: battery in automotive context means car starter battery, not AA/AAA household battery' : '',
+    'single real product item only',
+    'isolated object in center',
+    'square composition 1:1',
+    'object occupies around 75 percent of frame',
+    'clean white seamless background',
+    'soft studio lighting, high detail',
+    'photorealistic commercial packshot',
+    'no people',
+    'no shelf',
+    'no scene',
+    'no ecommerce card',
+    'no package mockup template',
+    'no UI',
+    'no text',
+    'no logo',
+    'no watermark'
+  ].filter(Boolean).join(', ');
+  const generationErrors = [];
+
+  try {
+    const geminiResult = await generateGlobalProductImageWithGemini(prompt);
+    if (geminiResult?.buffer) return geminiResult;
+  } catch (error) {
+    console.warn('Gemini generation fallback:', error?.message || error);
+    generationErrors.push(`gemini: ${error?.message || 'unknown'}`);
+  }
+
+  try {
+    const openAiResult = await generateGlobalProductImageWithOpenAI(prompt);
+    if (openAiResult?.buffer) return openAiResult;
+  } catch (error) {
+    console.warn('OpenAI generation fallback:', error?.message || error);
+    generationErrors.push(`openai: ${error?.message || 'unknown'}`);
+  }
+
+  try {
+    const openRouterResult = await generateGlobalProductImageWithOpenRouter(prompt);
+    if (openRouterResult?.buffer) return openRouterResult;
+  } catch (error) {
+    console.warn('OpenRouter generation fallback:', error?.message || error);
+    generationErrors.push(`openrouter: ${error?.message || 'unknown'}`);
+  }
+
+  try {
+    return await generateGlobalProductImageWithPollinations(prompt);
+  } catch (error) {
+    console.warn('Pollinations generation fallback:', error?.message || error);
+    generationErrors.push(`pollinations: ${error?.message || 'unknown'}`);
+  }
+
+  console.warn('All external generators failed, using local placeholder:', generationErrors.join(' | '));
+  return generateGlobalProductPlaceholderImage(cleanName);
+};
+
+const prepareGlobalProductTransparentPreview = async (inputBuffer) => {
+  const normalizedBuffer = await sharp(inputBuffer, { failOnError: false })
+    .rotate()
+    .resize({
+      width: GLOBAL_PRODUCT_AI_OUTPUT_SIZE,
+      height: GLOBAL_PRODUCT_AI_OUTPUT_SIZE,
+      fit: 'inside',
+      withoutEnlargement: false,
+      fastShrinkOnLoad: true
+    })
+    .png()
+    .toBuffer();
+
+  const alphaMask = await sharp(normalizedBuffer, { failOnError: false })
+    .removeAlpha()
+    .greyscale()
+    .negate()
+    .normalise()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const maskRawBuffer = alphaMask.data;
+  const maskInfo = alphaMask.info;
+  const maskRgbaBuffer = Buffer.alloc(maskRawBuffer.length * 4);
+  for (let index = 0; index < maskRawBuffer.length; index += 1) {
+    const targetOffset = index * 4;
+    maskRgbaBuffer[targetOffset] = 255;
+    maskRgbaBuffer[targetOffset + 1] = 255;
+    maskRgbaBuffer[targetOffset + 2] = 255;
+    maskRgbaBuffer[targetOffset + 3] = maskRawBuffer[index];
+  }
+
+  const maskPng = await sharp(maskRgbaBuffer, {
+    raw: {
+      width: maskInfo.width,
+      height: maskInfo.height,
+      channels: 4
+    }
+  })
+    .png()
+    .toBuffer();
+
+  const imageWithMask = await sharp(normalizedBuffer, { failOnError: false })
+    .ensureAlpha()
+    .composite([{ input: maskPng, blend: 'dest-in' }])
+    .png()
+    .toBuffer();
+
+  const alphaStats = await sharp(imageWithMask, { failOnError: false })
+    .extractChannel(3)
+    .stats();
+  const alphaMean = Number(alphaStats?.channels?.[0]?.mean || 0);
+  const alphaLooksValid = alphaMean > 2;
+
+  const trimmedSource = alphaLooksValid
+    ? await sharp(imageWithMask, { failOnError: false }).trim({ threshold: 6 }).png().toBuffer()
+    : await sharp(normalizedBuffer, { failOnError: false }).ensureAlpha().png().toBuffer();
+
+  const fitted = await sharp(trimmedSource, { failOnError: false })
+    .resize({
+      width: 900,
+      height: 900,
+      fit: 'contain',
+      background: { r: 0, g: 0, b: 0, alpha: 0 }
+    })
+    .png()
+    .toBuffer();
+
+  return sharp({
+    create: {
+      width: GLOBAL_PRODUCT_AI_OUTPUT_SIZE,
+      height: GLOBAL_PRODUCT_AI_OUTPUT_SIZE,
+      channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 0 }
+    }
+  })
+    .composite([{ input: fitted, gravity: 'center' }])
+    .webp({
+      quality: 88,
+      alphaQuality: 90,
+      effort: 5,
+      smartSubsample: true
+    })
+    .toBuffer();
+};
+
+const normalizeInstructionText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+
+const phoneDigitsOnly = (value) => String(normalizePhoneValue(value) || '').replace(/\D/g, '');
+
+const looksLikePhoneOrTelegramLogin = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+  if (raw.startsWith('@')) return true;
+  return /^[+\d\s()\-]+$/.test(raw);
+};
+
+const normalizeOperatorAuthFields = ({ username, phone }) => {
+  const normalizedPhone = normalizePhoneValue(phone) || null;
+  const usernameRaw = String(username || '').trim();
+  const normalizedUsername = (normalizedPhone && (!usernameRaw || looksLikePhoneOrTelegramLogin(usernameRaw)))
+    ? phoneDigitsOnly(normalizedPhone)
+    : usernameRaw;
+  return {
+    username: normalizedUsername,
+    phone: normalizedPhone
+  };
+};
+
+const normalizeUserIdentityForDisplay = (user) => {
+  if (!user) return user;
+  const normalizedPhone = normalizePhoneValue(user.phone) || normalizePhoneValue(user.username);
+  const digitsFromPhone = phoneDigitsOnly(user.phone) || phoneDigitsOnly(user.username);
+  const usernameRaw = String(user.username || '');
+  const shouldShowPhoneLogin =
+    !!digitsFromPhone &&
+    (user.role === 'operator' || user.role === 'moderator' || user.role === 'superadmin') &&
+    (looksLikePhoneOrTelegramLogin(usernameRaw) || !usernameRaw);
+
+  return {
+    ...user,
+    phone: normalizedPhone || null,
+    username: shouldShowPhoneLogin ? digitsFromPhone : user.username
+  };
+};
+
+const resolveCentralBotMeta = async (token) => {
+  const normalizedToken = normalizeTokenValue(token);
+  if (!normalizedToken) {
+    return {
+      superadmin_bot_name: null,
+      superadmin_bot_username: null
+    };
+  }
+
+  const bot = new TelegramBot(normalizedToken);
+  const me = await bot.getMe();
+
+  return {
+    superadmin_bot_name: me?.first_name || null,
+    superadmin_bot_username: me?.username ? `@${me.username}` : null
+  };
+};
+
+const resolveTelegramBotMeta = async (token) => {
+  const normalizedToken = normalizeTokenValue(token);
+  if (!normalizedToken) {
+    return {
+      telegram_bot_name: null,
+      telegram_bot_username: null
+    };
+  }
+
+  const bot = new TelegramBot(normalizedToken);
+  const me = await bot.getMe();
+
+  return {
+    telegram_bot_name: me?.first_name || null,
+    telegram_bot_username: me?.username ? `@${me.username}` : null
+  };
+};
+
+const trimTelegramDiagnosticText = (value, maxLength = 240) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.length <= maxLength) return raw;
+  return `${raw.slice(0, Math.max(1, maxLength - 1))}…`;
+};
+
+const detectTelegramDiagnosticErrorCode = (message) => {
+  const normalized = String(message || '').toLowerCase();
+  if (!normalized) return 'unknown';
+  if (normalized.includes('401') || normalized.includes('unauthorized')) return 'unauthorized';
+  if (normalized.includes('404') || normalized.includes('not found')) return 'not_found';
+  if (normalized.includes('429') || normalized.includes('too many requests')) return 'rate_limit';
+  if (normalized.includes('timeout') || normalized.includes('timed out') || normalized.includes('econn') || normalized.includes('network')) return 'network';
+  return 'unknown';
+};
+
+const makeTelegramDiagnosticIssue = ({
+  code,
+  title,
+  description,
+  solution,
+  severity = 'error'
+}) => ({
+  code,
+  title,
+  description: trimTelegramDiagnosticText(description, 360),
+  solution: trimTelegramDiagnosticText(solution, 240),
+  severity: severity === 'warning' ? 'warning' : 'error'
+});
+
+const buildRestaurantTelegramDiagnostics = async (restaurant) => {
+  const restaurantId = Number.parseInt(restaurant?.id, 10);
+  const restaurantName = String(restaurant?.name || '').trim() || `#${restaurantId || '?'}`;
+  const token = normalizeTokenValue(restaurant?.telegram_bot_token);
+  const checks = [];
+  const issues = [];
+  const pushCheck = (code, label, ok, hint = '') => {
+    checks.push({
+      code,
+      label,
+      ok: !!ok,
+      hint: hint ? trimTelegramDiagnosticText(hint, 220) : ''
+    });
+  };
+
+  if (!token) {
+    issues.push(makeTelegramDiagnosticIssue({
+      code: 'token_missing',
+      title: 'Не указан Telegram Bot Token',
+      description: 'У магазина не заполнен токен бота, Telegram-интеграция не сможет работать.',
+      solution: 'Откройте редактирование магазина, вставьте актуальный токен из BotFather и сохраните.'
+    }));
+    pushCheck('token_present', 'Токен бота заполнен', false, 'Токен отсутствует');
+    pushCheck('token_valid', 'Токен проходит проверку в Telegram', false, 'Проверка невозможна без токена');
+    pushCheck('webhook_configured', 'Webhook установлен', false, 'Webhook нельзя проверить без валидного токена');
+
+    return {
+      restaurant_id: restaurantId || null,
+      restaurant_name: restaurantName,
+      issue_count: issues.length,
+      issues,
+      checks,
+      checked_at: new Date().toISOString()
+    };
+  }
+
+  pushCheck('token_present', 'Токен бота заполнен', true, '');
+
+  let bot = null;
+  let botProfile = null;
+  try {
+    bot = new TelegramBot(token);
+    botProfile = await bot.getMe();
+    pushCheck('token_valid', 'Токен проходит проверку в Telegram', true, '');
+  } catch (error) {
+    const errorMessage = trimTelegramDiagnosticText(error?.message || 'Не удалось проверить токен', 280);
+    const errorCode = detectTelegramDiagnosticErrorCode(errorMessage);
+    let title = 'Токен бота не прошёл проверку';
+    let solution = 'Проверьте токен в BotFather и сохраните его заново в настройках магазина.';
+
+    if (errorCode === 'unauthorized') {
+      title = 'Недействительный токен (401 Unauthorized)';
+      solution = 'Запросите у клиента новый токен в BotFather, обновите токен магазина и сохраните.';
+    } else if (errorCode === 'not_found') {
+      title = 'Бот не найден (404 Not Found)';
+      solution = 'Проверьте, что бот существует, и токен скопирован полностью без лишних пробелов.';
+    } else if (errorCode === 'rate_limit') {
+      title = 'Временный лимит Telegram API (429)';
+      solution = 'Подождите 1-2 минуты и нажмите «Перепроверить».';
+    } else if (errorCode === 'network') {
+      title = 'Сетевая ошибка при проверке бота';
+      solution = 'Проверьте доступность Telegram API и повторите проверку позже.';
+    }
+
+    issues.push(makeTelegramDiagnosticIssue({
+      code: 'token_invalid',
+      title,
+      description: `Telegram вернул ошибку: ${errorMessage}`,
+      solution
+    }));
+    pushCheck('token_valid', 'Токен проходит проверку в Telegram', false, errorMessage);
+    pushCheck('webhook_configured', 'Webhook установлен', false, 'Webhook не проверяется, пока токен невалиден');
+
+    return {
+      restaurant_id: restaurantId || null,
+      restaurant_name: restaurantName,
+      issue_count: issues.length,
+      issues,
+      checks,
+      bot_username: null,
+      checked_at: new Date().toISOString()
+    };
+  }
+
+  try {
+    const webhookInfo = await bot.getWebHookInfo();
+    const webhookUrl = String(webhookInfo?.url || '').trim();
+    const expectedPath = `/api/telegram/webhook/${restaurantId}`;
+    const webhookIsSet = !!webhookUrl;
+    const webhookMatchesExpectedPath = webhookUrl.includes(expectedPath);
+    const pendingUpdates = Number.parseInt(webhookInfo?.pending_update_count, 10);
+    const lastErrorMessage = trimTelegramDiagnosticText(webhookInfo?.last_error_message || '', 300);
+    const lastErrorDateRaw = Number.parseInt(webhookInfo?.last_error_date, 10);
+    const lastErrorAt = Number.isFinite(lastErrorDateRaw) && lastErrorDateRaw > 0
+      ? new Date(lastErrorDateRaw * 1000).toISOString()
+      : null;
+
+    pushCheck('webhook_configured', 'Webhook установлен', webhookIsSet, webhookIsSet ? '' : 'Telegram не вернул URL webhook');
+    pushCheck(
+      'webhook_target',
+      'Webhook направлен в правильный маршрут магазина',
+      webhookIsSet && webhookMatchesExpectedPath,
+      webhookIsSet
+        ? (webhookMatchesExpectedPath ? '' : `Текущий URL: ${trimTelegramDiagnosticText(webhookUrl, 140)}`)
+        : 'URL webhook отсутствует'
+    );
+
+    if (!webhookIsSet) {
+      issues.push(makeTelegramDiagnosticIssue({
+        code: 'webhook_missing',
+        title: 'Webhook не установлен',
+        description: 'Telegram не содержит webhook URL для этого магазина.',
+        solution: 'Сохраните настройки магазина с токеном и выполните redeploy/restart сервиса.'
+      }));
+    } else if (!webhookMatchesExpectedPath) {
+      issues.push(makeTelegramDiagnosticIssue({
+        code: 'webhook_mismatch',
+        title: 'Webhook указывает на другой маршрут',
+        description: `Сейчас используется URL: ${webhookUrl}`,
+        solution: 'Пересохраните токен магазина и выполните redeploy, чтобы webhook выставился автоматически.'
+      }));
+    }
+
+    if (lastErrorMessage) {
+      issues.push(makeTelegramDiagnosticIssue({
+        code: 'webhook_last_error',
+        title: 'Telegram сообщает последнюю ошибку webhook',
+        description: `${lastErrorMessage}${lastErrorAt ? ` (время: ${lastErrorAt})` : ''}`,
+        solution: 'Исправьте причину ошибки (чаще всего токен/домен), затем нажмите «Перепроверить».',
+        severity: 'warning'
+      }));
+    }
+
+    if (Number.isFinite(pendingUpdates) && pendingUpdates > 100) {
+      issues.push(makeTelegramDiagnosticIssue({
+        code: 'webhook_backlog',
+        title: 'Накопилась очередь обновлений в webhook',
+        description: `В очереди Telegram сейчас ${pendingUpdates} обновлений.`,
+        solution: 'Проверьте доступность backend и корректность webhook. После стабилизации очередь уменьшится.',
+        severity: 'warning'
+      }));
+    }
+
+    return {
+      restaurant_id: restaurantId || null,
+      restaurant_name: restaurantName,
+      issue_count: issues.length,
+      issues,
+      checks,
+      bot_username: botProfile?.username ? `@${botProfile.username}` : null,
+      webhook_url: webhookUrl || null,
+      pending_update_count: Number.isFinite(pendingUpdates) ? pendingUpdates : 0,
+      checked_at: new Date().toISOString()
+    };
+  } catch (error) {
+    const webhookErrorMessage = trimTelegramDiagnosticText(error?.message || 'Не удалось получить webhook информацию', 280);
+    issues.push(makeTelegramDiagnosticIssue({
+      code: 'webhook_check_failed',
+      title: 'Не удалось проверить webhook',
+      description: webhookErrorMessage,
+      solution: 'Повторите проверку через несколько секунд. Если ошибка повторяется, проверьте сеть/доступ к Telegram API.'
+    }));
+    pushCheck('webhook_configured', 'Webhook установлен', false, webhookErrorMessage);
+    pushCheck('webhook_target', 'Webhook направлен в правильный маршрут магазина', false, webhookErrorMessage);
+
+    return {
+      restaurant_id: restaurantId || null,
+      restaurant_name: restaurantName,
+      issue_count: issues.length,
+      issues,
+      checks,
+      bot_username: botProfile?.username ? `@${botProfile.username}` : null,
+      checked_at: new Date().toISOString()
+    };
+  }
+};
+
+const enrichRestaurantWithBotMeta = async (restaurant) => {
+  if (!restaurant) return restaurant;
+
+  try {
+    return {
+      ...restaurant,
+      ...(await resolveTelegramBotMeta(restaurant.telegram_bot_token))
+    };
+  } catch (error) {
+    return {
+      ...restaurant,
+      telegram_bot_name: null,
+      telegram_bot_username: null,
+      telegram_bot_meta_error: error.message
+    };
+  }
+};
+
+const enrichBillingSettingsWithCentralBotMeta = async (settings) => {
+  const baseSettings = settings || {};
+
+  try {
+    return {
+      ...baseSettings,
+      ...(await resolveCentralBotMeta(baseSettings.superadmin_bot_token))
+    };
+  } catch (error) {
+    return {
+      ...baseSettings,
+      superadmin_bot_name: null,
+      superadmin_bot_username: null,
+      superadmin_bot_meta_error: error.message
+    };
+  }
+};
+
+const notifySuperadminTokenChanged = async (telegramId) => {
+  if (!telegramId) return;
+  const bot = getBot();
+  if (!bot) return;
+
+  await bot.sendMessage(
+    telegramId,
+    '✅ Вы успешно сменили токен супер админа.\n🤖 Это ваш новый бот.'
+  );
+};
+
+const normalizeRestaurantTokenForCompare = (value) => (
+  value === undefined || value === null ? '' : String(value).trim()
+);
+const parseDateOrNull = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+const isBotBlockedOrDeletedByMetaError = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized.includes('401')
+    || normalized.includes('403')
+    || normalized.includes('404')
+    || normalized.includes('unauthorized')
+    || normalized.includes('forbidden')
+    || normalized.includes('not found')
+    || normalized.includes('bot was blocked')
+    || normalized.includes('deactivated')
+  );
+};
+const deriveRestaurantWorkflowStatusMeta = (restaurant) => {
+  const manualStatus = normalizeRestaurantWorkflowStatus(
+    restaurant?.workflow_status_manual || restaurant?.workflow_status,
+    'new'
+  );
+  const reasons = [];
+
+  if (restaurant?.is_active === false) {
+    reasons.push('disabled_by_admin');
+  }
+  if (isBotBlockedOrDeletedByMetaError(restaurant?.telegram_bot_meta_error)) {
+    reasons.push('bot_blocked_or_deleted');
+  }
+
+  const nowMs = Date.now();
+  const inactiveAfterMs = RESTAURANT_AUTO_INACTIVE_DAYS * 24 * 60 * 60 * 1000;
+  const latestOperatorActivityAt = parseDateOrNull(restaurant?.latest_operator_activity_at);
+  const createdAt = parseDateOrNull(restaurant?.created_at);
+  const inactivityReference = latestOperatorActivityAt || createdAt;
+  if (inactivityReference && (nowMs - inactivityReference.getTime()) >= inactiveAfterMs) {
+    reasons.push('operator_inactive_30d');
+  }
+
+  const autoInactive = reasons.length > 0;
+  const effectiveStatus = autoInactive
+    ? 'inactive'
+    : normalizeRestaurantWorkflowStatus(restaurant?.workflow_status, manualStatus);
+
+  return {
+    manualStatus,
+    effectiveStatus,
+    autoInactive,
+    reasons
+  };
+};
+const enrichRestaurantWithWorkflowStatus = (restaurant) => {
+  const source = restaurant || {};
+  const meta = deriveRestaurantWorkflowStatusMeta(source);
+  return {
+    ...source,
+    workflow_status_manual: meta.manualStatus,
+    workflow_status: meta.effectiveStatus,
+    workflow_auto_inactive: meta.autoInactive,
+    workflow_auto_inactive_reasons: meta.reasons
+  };
+};
+
+const notifyCustomersAboutRestaurantBotMigration = async ({
+  restaurantId,
+  restaurantName,
+  oldToken,
+  newToken
+}) => {
+  const previousToken = normalizeRestaurantTokenForCompare(oldToken);
+  const currentToken = normalizeRestaurantTokenForCompare(newToken);
+
+  if (!previousToken || !currentToken || previousToken === currentToken) {
+    return { ok: true, skipped: true, reason: 'unchanged_or_missing_token' };
+  }
+
+  let newBotUsername = null;
+  try {
+    const newBot = getRestaurantBot(currentToken);
+    const me = await newBot.getMe();
+    newBotUsername = me?.username || null;
+  } catch (error) {
+    return { ok: false, error: 'Новый токен бота некорректен или бот недоступен', details: error.message };
+  }
+
+  let oldBot;
+  try {
+    oldBot = getRestaurantBot(previousToken);
+    await oldBot.getMe();
+  } catch (error) {
+    return { ok: false, error: 'Старый бот недоступен. Нельзя уведомить клиентов перед сменой токена', details: error.message };
+  }
+
+  const recipientsResult = await pool.query(
+    `SELECT DISTINCT u.telegram_id
+     FROM users u
+     WHERE u.role = 'customer'
+       AND u.telegram_id IS NOT NULL
+       AND (
+         u.active_restaurant_id = $1
+         OR EXISTS (
+           SELECT 1
+           FROM orders o
+           WHERE o.user_id = u.id
+             AND o.restaurant_id = $1
+         )
+       )`,
+    [restaurantId]
+  );
+
+  const recipients = recipientsResult.rows.map((row) => row.telegram_id).filter(Boolean);
+  if (!recipients.length) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: 'no_customers',
+      total: 0,
+      delivered: 0,
+      failed: 0,
+      newBotUsername
+    };
+  }
+
+  const newBotLink = newBotUsername ? `https://t.me/${newBotUsername}` : null;
+  const message =
+    `⚠️ Важное обновление от магазина "${restaurantName}"\n\n` +
+    `Мы перешли в новый Telegram-бот для заказов.\n` +
+    `${newBotUsername ? `Новый бот: @${newBotUsername}\n` : ''}` +
+    `${newBotLink ? `Открыть: ${newBotLink}\n` : ''}` +
+    `Пожалуйста, нажмите /start в новом боте, чтобы продолжить получать уведомления и оформлять заказы.`;
+
+  const failures = [];
+  let delivered = 0;
+
+  for (const telegramId of recipients) {
+    try {
+      await oldBot.sendMessage(telegramId, message);
+      delivered += 1;
+    } catch (error) {
+      failures.push({ telegram_id: telegramId, error: error.message });
+    }
+  }
+
+  if (failures.length > 0) {
+    return {
+      ok: false,
+      error: 'Не удалось уведомить всех клиентов через старый бот. Смена токена остановлена.',
+      total: recipients.length,
+      delivered,
+      failed: failures.length,
+      failedRecipients: failures.slice(0, 20),
+      newBotUsername
+    };
+  }
+
+  return {
+    ok: true,
+    total: recipients.length,
+    delivered,
+    failed: 0,
+    newBotUsername
+  };
+};
+
+const notifyRestaurantTokenChanged = async ({
+  restaurantId,
+  restaurantName,
+  oldToken,
+  newToken
+}) => {
+  const previousToken = normalizeRestaurantTokenForCompare(oldToken);
+  const currentToken = normalizeRestaurantTokenForCompare(newToken);
+  if (previousToken === currentToken || !currentToken) {
+    return { skipped: true, reason: 'unchanged_or_empty_token' };
+  }
+
+  let botUsername = null;
+  const recipientsResult = await pool.query(
+    `SELECT DISTINCT u.telegram_id
+     FROM users u
+     INNER JOIN operator_restaurants opr ON opr.user_id = u.id
+     WHERE opr.restaurant_id = $1
+       AND u.telegram_id IS NOT NULL
+       AND u.is_active = true
+       AND u.role IN ('operator', 'superadmin')`,
+    [restaurantId]
+  );
+
+  const recipients = recipientsResult.rows.map((row) => row.telegram_id).filter(Boolean);
+  if (!recipients.length) {
+    return { skipped: true, reason: 'no_operator_recipients' };
+  }
+
+  let bot;
+  try {
+    bot = getRestaurantBot(currentToken);
+    const me = await bot.getMe();
+    botUsername = me?.username || null;
+  } catch (error) {
+    return { skipped: true, reason: 'new_bot_unavailable', details: error.message };
+  }
+
+  const message = `✅ Токен бота магазина успешно обновлен.\n🏪 Магазин: ${restaurantName}\n🤖 Новый бот: ${botUsername ? `@${botUsername}` : 'подключен'}\n\nЕсли сообщение не пришло, откройте новый бот и нажмите /start.`;
+  const failures = [];
+  let delivered = 0;
+
+  for (const telegramId of recipients) {
+    try {
+      await bot.sendMessage(telegramId, message);
+      delivered += 1;
+    } catch (error) {
+      failures.push({ telegram_id: telegramId, error: error.message });
+    }
+  }
+
+  return {
+    total: recipients.length,
+    delivered,
+    failed: failures.length,
+    failedRecipients: failures.slice(0, 20),
+    botUsername
+  };
+};
+
+const normalizeCategoryId = (value) => {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isNaN(parsed) ? null : parsed;
+};
+
+const normalizeCategoryName = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+const normalizeCategorySortOrder = (value, fallback = 0) => {
+  const fallbackValue = Number.isFinite(Number(fallback)) ? Math.trunc(Number(fallback)) : 0;
+  if (value === undefined || value === null || value === '') {
+    return fallbackValue;
+  }
+  const numeric = Number(String(value).trim().replace(',', '.'));
+  if (!Number.isFinite(numeric)) {
+    return fallbackValue;
+  }
+  const normalized = Math.trunc(numeric);
+  if (!Number.isFinite(normalized)) {
+    return fallbackValue;
+  }
+  return Math.min(CATEGORY_SORT_ORDER_MAX, Math.max(CATEGORY_SORT_ORDER_MIN, normalized));
+};
+
+const getCategoryChainFromLeaf = async (client, categoryId) => {
+  const normalizedCategoryId = normalizeCategoryId(categoryId);
+  if (!normalizedCategoryId) return [];
+
+  const result = await client.query(`
+    WITH RECURSIVE category_chain AS (
+      SELECT id, parent_id, name_ru, name_uz, 1 AS depth
+      FROM categories
+      WHERE id = $1
+
+      UNION ALL
+
+      SELECT c.id, c.parent_id, c.name_ru, c.name_uz, cc.depth + 1
+      FROM categories c
+      INNER JOIN category_chain cc ON cc.parent_id = c.id
+      WHERE cc.depth < $2
+    )
+    SELECT id, parent_id, name_ru, name_uz, depth
+    FROM category_chain
+    ORDER BY depth DESC, id ASC
+  `, [normalizedCategoryId, CATEGORY_CHAIN_GUARD_LIMIT]);
+
+  return Array.isArray(result.rows) ? result.rows : [];
+};
+
+const buildAiCategoryContextPath = ({ chainRows = [], leafName = '' } = {}) => {
+  const result = [];
+  const unique = new Set();
+  const pushName = (value) => {
+    const normalized = normalizeCategoryName(value).slice(0, 84);
+    if (!normalized) return;
+    const key = normalized.toLowerCase();
+    if (unique.has(key)) return;
+    unique.add(key);
+    result.push(normalized);
+  };
+
+  for (const row of chainRows) {
+    pushName(row?.name_ru || row?.name_uz || '');
+    if (result.length >= 8) break;
+  }
+  if (result.length < 8) {
+    pushName(leafName);
+  }
+
+  return result;
+};
+
+const AD_BANNER_MAX_SLOTS = 10;
+const AD_TRANSITIONS = new Set(['none', 'fade', 'slide']);
+const AD_BANNER_TYPES = new Set(['banner', 'entry_popup']);
+const TASHKENT_TZ = 'Asia/Tashkent';
+const ANALYTICS_TIMEZONE = process.env.RESTAURANT_TIMEZONE || TASHKENT_TZ;
+const OPERATOR_PAYMENT_METHODS = ['click', 'payme', 'cash', 'card', 'bank', 'xazna', 'uzum'];
+const OPERATOR_PAYMENT_LABELS = {
+  click: 'Click',
+  payme: 'Payme',
+  cash: 'Наличные',
+  card: 'Карта',
+  xazna: 'Xazna',
+  uzum: 'Uzum'
+};
+const RESERVATION_TEMPLATE_SHAPES = new Set(['round', 'square', 'rect', 'sofa', 'custom']);
+const RESERVATION_FURNITURE_CATEGORIES = new Set(['tables_chairs', 'bed', 'garage_box', 'work_desk', 'bunk']);
+const normalizeReservationTemplateShape = (value, fallback = 'custom') => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return RESERVATION_TEMPLATE_SHAPES.has(normalized) ? normalized : fallback;
+};
+const normalizeReservationFurnitureCategory = (value, fallback = 'tables_chairs') => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return RESERVATION_FURNITURE_CATEGORIES.has(normalized) ? normalized : fallback;
+};
+const normalizeReservationTemplateCode = (value) => (
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 72)
+);
+const generateReservationTemplateCode = (name) => {
+  const base = normalizeReservationTemplateCode(name) || 'template';
+  const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 36 * 36).toString(36).padStart(2, '0')}`;
+  return `${base}_${suffix}`.slice(0, 80);
+};
+const normalizeReservationTemplateImageUrl = (value) => {
+  const normalized = String(value || '').trim();
+  if (!normalized) return '';
+  if (/^https?:\/\//i.test(normalized)) return normalized;
+  if (/^data:image\//i.test(normalized)) return normalized;
+  if (normalized.startsWith('/uploads/') || normalized.startsWith('/reservation-furniture/')) return normalized;
+  return '';
+};
+const parseReservationTemplateInt = (value, fallback = 0) => {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return parsed;
+};
+const parseReservationTemplateFloat = (value, fallback = 0) => {
+  const parsed = Number.parseFloat(String(value ?? '').replace(',', '.'));
+  if (!Number.isFinite(parsed)) return fallback;
+  return parsed;
+};
+const guvohnomaUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: GUVOHNOMA_MAX_FILE_SIZE_BYTES },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(String(file.originalname || '')).toLowerCase();
+    const mimeType = String(file.mimetype || '').toLowerCase();
+    const hasTrustedMimeType = GUVOHNOMA_ALLOWED_MIME_TYPES.has(mimeType)
+      || mimeType === 'application/octet-stream'
+      || mimeType === '';
+    if (GUVOHNOMA_ALLOWED_EXTENSIONS.has(ext) && hasTrustedMimeType) {
+      cb(null, true);
+      return;
+    }
+    cb(new Error('Гувохнома должна быть файлом JPG, PNG или PDF'), false);
+  }
+});
+const sanitizeGuvohnomaOriginalName = (value) => (
+  String(value || 'guvohnoma')
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180) || 'guvohnoma'
+);
+const assertGuvohnomaBufferIsValid = (file) => {
+  const buffer = file?.buffer;
+  if (!Buffer.isBuffer(buffer) || buffer.length < 4) {
+    throw new Error('Файл поврежден или пустой');
+  }
+
+  const ext = path.extname(String(file.originalname || '')).toLowerCase();
+  if (!GUVOHNOMA_ALLOWED_EXTENSIONS.has(ext)) {
+    throw new Error('Гувохнома должна быть файлом JPG, PNG или PDF');
+  }
+
+  if (ext === '.pdf') {
+    if (buffer.slice(0, 4).toString('ascii') !== '%PDF') {
+      throw new Error('Некорректный PDF файл');
+    }
+    return;
+  }
+
+  if (ext === '.png') {
+    const pngSignature = buffer.slice(0, 8);
+    if (
+      pngSignature.length < 8
+      || pngSignature[0] !== 0x89
+      || pngSignature[1] !== 0x50
+      || pngSignature[2] !== 0x4e
+      || pngSignature[3] !== 0x47
+      || pngSignature[4] !== 0x0d
+      || pngSignature[5] !== 0x0a
+      || pngSignature[6] !== 0x1a
+      || pngSignature[7] !== 0x0a
+    ) {
+      throw new Error('Некорректный PNG файл');
+    }
+    return;
+  }
+
+  if (!(buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff)) {
+    throw new Error('Некорректный JPG файл');
+  }
+};
+const buildGuvohnomaFilename = (restaurantId, originalName) => {
+  const ext = path.extname(String(originalName || '')).toLowerCase();
+  const safeExt = GUVOHNOMA_ALLOWED_EXTENSIONS.has(ext) ? ext : '.pdf';
+  const suffix = `${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
+  return `restaurant-${restaurantId}-${suffix}${safeExt}`;
+};
+const ensureRestaurantCurrencySchema = async () => {
+  if (restaurantCurrencySchemaReady) return;
+  if (restaurantCurrencySchemaPromise) {
+    await restaurantCurrencySchemaPromise;
+    return;
+  }
+
+  restaurantCurrencySchemaPromise = (async () => {
+    await pool.query(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS currency_code VARCHAR(8) DEFAULT 'uz'`).catch(() => {});
+    await pool.query(`
+      UPDATE restaurants
+      SET currency_code = 'uz'
+      WHERE currency_code IS NULL
+         OR BTRIM(currency_code) = ''
+         OR LOWER(currency_code) NOT IN ('uz', 'kz', 'tm', 'tj', 'kg', 'af', 'ru', 'us')
+    `).catch(() => {});
+    restaurantCurrencySchemaReady = true;
+  })();
+
+  try {
+    await restaurantCurrencySchemaPromise;
+  } finally {
+    restaurantCurrencySchemaPromise = null;
+  }
+};
+const ensureRestaurantAdminCommentSchema = async () => {
+  if (restaurantAdminCommentSchemaReady) return;
+  if (restaurantAdminCommentSchemaPromise) {
+    await restaurantAdminCommentSchemaPromise;
+    return;
+  }
+
+  restaurantAdminCommentSchemaPromise = (async () => {
+    await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS admin_comment TEXT').catch(() => {});
+    await pool.query(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS admin_comment_checklist JSONB DEFAULT '[]'::jsonb`).catch(() => {});
+    await pool.query(`
+      UPDATE restaurants
+      SET admin_comment_checklist = '[]'::jsonb
+      WHERE admin_comment_checklist IS NULL
+    `).catch(() => {});
+    restaurantAdminCommentSchemaReady = true;
+  })();
+
+  try {
+    await restaurantAdminCommentSchemaPromise;
+  } finally {
+    restaurantAdminCommentSchemaPromise = null;
+  }
+};
+const ensureRestaurantWorkflowStatusSchema = async () => {
+  if (restaurantWorkflowSchemaReady) return;
+  if (restaurantWorkflowSchemaPromise) {
+    await restaurantWorkflowSchemaPromise;
+    return;
+  }
+
+  restaurantWorkflowSchemaPromise = (async () => {
+    await pool.query(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS workflow_status VARCHAR(32) DEFAULT 'new'`).catch(() => { });
+    await pool.query(`
+      UPDATE restaurants
+      SET workflow_status = 'new'
+      WHERE workflow_status IS NULL
+         OR BTRIM(workflow_status) = ''
+         OR LOWER(workflow_status) NOT IN ('new', 'negotiation', 'queue', 'token', 'store_settings', 'products', 'homonym', 'active', 'inactive')
+    `).catch(() => { });
+    await ensureCheckConstraint(pool, {
+      tableName: 'restaurants',
+      constraintName: 'restaurants_workflow_status_check',
+      checkExpression: `workflow_status IN ('new', 'negotiation', 'queue', 'token', 'store_settings', 'products', 'homonym', 'active', 'inactive')`
+    }).catch(() => { });
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_restaurants_workflow_status ON restaurants(workflow_status)`).catch(() => { });
+    restaurantWorkflowSchemaReady = true;
+  })();
+
+  try {
+    await restaurantWorkflowSchemaPromise;
+  } finally {
+    restaurantWorkflowSchemaPromise = null;
+  }
+};
+
+const ensureRestaurantGuvohnomaSchema = async () => {
+  if (restaurantGuvohnomaSchemaReady) return;
+  if (restaurantGuvohnomaSchemaPromise) {
+    await restaurantGuvohnomaSchemaPromise;
+    return;
+  }
+
+  restaurantGuvohnomaSchemaPromise = (async () => {
+    await pool.query(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS guvohnoma_file_url TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS guvohnoma_file_name TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS guvohnoma_file_mime VARCHAR(120)`).catch(() => {});
+    await pool.query(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS guvohnoma_file_size BIGINT DEFAULT 0`).catch(() => {});
+    await pool.query(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS guvohnoma_uploaded_at TIMESTAMP`).catch(() => {});
+    await pool.query(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS guvohnoma_uploaded_by_id INTEGER`).catch(() => {});
+    await pool.query(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS guvohnoma_uploaded_by_name TEXT`).catch(() => {});
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS restaurant_guvohnoma_files (
+        id SERIAL PRIMARY KEY,
+        restaurant_id INTEGER NOT NULL REFERENCES restaurants(id) ON DELETE CASCADE,
+        file_url TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        file_mime VARCHAR(120),
+        file_size BIGINT DEFAULT 0,
+        uploaded_by_id INTEGER,
+        uploaded_by_name TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `).catch(() => {});
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_restaurant_guvohnoma_files_restaurant
+      ON restaurant_guvohnoma_files(restaurant_id, created_at DESC, id DESC)
+    `).catch(() => {});
+    await pool.query(`
+      INSERT INTO restaurant_guvohnoma_files (
+        restaurant_id,
+        file_url,
+        file_name,
+        file_mime,
+        file_size,
+        uploaded_by_id,
+        uploaded_by_name,
+        created_at
+      )
+      SELECT
+        r.id,
+        r.guvohnoma_file_url,
+        COALESCE(NULLIF(BTRIM(r.guvohnoma_file_name), ''), 'Гувохнома'),
+        r.guvohnoma_file_mime,
+        COALESCE(r.guvohnoma_file_size, 0),
+        r.guvohnoma_uploaded_by_id,
+        r.guvohnoma_uploaded_by_name,
+        COALESCE(r.guvohnoma_uploaded_at, r.updated_at, r.created_at, CURRENT_TIMESTAMP)
+      FROM restaurants r
+      WHERE r.guvohnoma_file_url IS NOT NULL
+        AND BTRIM(r.guvohnoma_file_url) <> ''
+        AND NOT EXISTS (
+          SELECT 1
+          FROM restaurant_guvohnoma_files gf
+          WHERE gf.restaurant_id = r.id
+            AND gf.file_url = r.guvohnoma_file_url
+        )
+    `).catch(() => {});
+    restaurantGuvohnomaSchemaReady = true;
+  })();
+
+  try {
+    await restaurantGuvohnomaSchemaPromise;
+  } finally {
+    restaurantGuvohnomaSchemaPromise = null;
+  }
+};
+
+// Флаг «показывать контакты магазина (продавца) в карточке товара на витрине».
+// Включается/выключается только суперадмином. По умолчанию всегда выключен.
+let restaurantShowContactsSchemaReady = false;
+const ensureRestaurantShowContactsSchema = async () => {
+  if (restaurantShowContactsSchemaReady) return;
+  await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS show_store_contacts BOOLEAN DEFAULT false').catch(() => {});
+  restaurantShowContactsSchemaReady = true;
+};
+
+const ensureRestaurantNamePolicy = async () => {
+  if (restaurantNamePolicyReady) return;
+  if (restaurantNamePolicyPromise) {
+    await restaurantNamePolicyPromise;
+    return;
+  }
+  restaurantNamePolicyPromise = (async () => {
+    const rowsResult = await pool.query(`SELECT id, name FROM restaurants ORDER BY id ASC`);
+    const rows = Array.isArray(rowsResult.rows) ? rowsResult.rows : [];
+    for (const row of rows) {
+      const id = Number(row.id);
+      const sanitized = sanitizeExistingRestaurantName(row.name, `SHOP ${id}`);
+      if (String(row.name || '') !== sanitized) {
+        await pool.query(
+          `UPDATE restaurants SET name = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+          [sanitized, id]
+        );
+      }
+    }
+    restaurantNamePolicyReady = true;
+  })();
+
+  try {
+    await restaurantNamePolicyPromise;
+  } finally {
+    restaurantNamePolicyPromise = null;
+  }
+};
+
+const ensureRestaurantReservationSettingsRow = async (client, restaurantId) => {
+  await ensureReservationSchema({ client });
+  await client.query(
+    `INSERT INTO restaurant_reservation_settings (
+       restaurant_id,
+       enabled,
+       reservation_fee,
+       reservation_service_cost,
+       max_duration_minutes,
+       allow_multi_table
+     )
+     VALUES ($1, false, 0, 0, 180, true)
+     ON CONFLICT (restaurant_id) DO NOTHING`,
+    [restaurantId]
+  );
+};
+
+const padAnalyticsDatePart = (value) => String(value).padStart(2, '0');
+const formatAnalyticsDateKey = (year, month, day) => (
+  `${year}-${padAnalyticsDatePart(month)}-${padAnalyticsDatePart(day)}`
+);
+const parseAnalyticsDateKey = (rawValue) => {
+  const value = String(rawValue || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const [year, month, day] = value.split('-').map((part) => Number.parseInt(part, 10));
+  if (!year || !month || !day) return null;
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (Number.isNaN(probe.getTime())) return null;
+  return value;
+};
+const parseAnalyticsInt = (value) => {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+const parseAnalyticsPeriod = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'monthly' || normalized === 'month') return 'monthly';
+  if (normalized === 'yearly' || normalized === 'year') return 'yearly';
+  return 'daily';
+};
+const getDateKeyInTimeZone = (date = new Date(), timeZone = ANALYTICS_TIMEZONE) => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date);
+  const year = parts.find((part) => part.type === 'year')?.value || '0000';
+  const month = parts.find((part) => part.type === 'month')?.value || '01';
+  const day = parts.find((part) => part.type === 'day')?.value || '01';
+  return `${year}-${month}-${day}`;
+};
+const resolveAnalyticsRange = (query = {}) => {
+  const todayDateKey = getDateKeyInTimeZone(new Date(), ANALYTICS_TIMEZONE);
+  const baseDateKey = parseAnalyticsDateKey(query.date) || todayDateKey;
+  const [baseYear, baseMonth, baseDay] = baseDateKey.split('-').map((part) => Number.parseInt(part, 10));
+  const period = parseAnalyticsPeriod(query.period);
+
+  if (period === 'monthly') {
+    const year = parseAnalyticsInt(query.year) || baseYear;
+    const monthRaw = parseAnalyticsInt(query.month) || baseMonth;
+    const month = Math.max(1, Math.min(12, monthRaw));
+    const startDateKey = formatAnalyticsDateKey(year, month, 1);
+    const nextMonthDate = new Date(Date.UTC(year, month, 1));
+    const endDateKeyExclusive = formatAnalyticsDateKey(
+      nextMonthDate.getUTCFullYear(),
+      nextMonthDate.getUTCMonth() + 1,
+      nextMonthDate.getUTCDate()
+    );
+    return {
+      period,
+      dateKey: startDateKey,
+      startDateKey,
+      endDateKeyExclusive,
+      year,
+      month
+    };
+  }
+
+  if (period === 'yearly') {
+    const year = parseAnalyticsInt(query.year) || baseYear;
+    const startDateKey = formatAnalyticsDateKey(year, 1, 1);
+    const endDateKeyExclusive = formatAnalyticsDateKey(year + 1, 1, 1);
+    return {
+      period,
+      dateKey: startDateKey,
+      startDateKey,
+      endDateKeyExclusive,
+      year,
+      month: null
+    };
+  }
+
+  const startDateKey = formatAnalyticsDateKey(baseYear, baseMonth, baseDay);
+  const nextDate = new Date(Date.UTC(baseYear, baseMonth - 1, baseDay + 1));
+  const endDateKeyExclusive = formatAnalyticsDateKey(
+    nextDate.getUTCFullYear(),
+    nextDate.getUTCMonth() + 1,
+    nextDate.getUTCDate()
+  );
+  return {
+    period: 'daily',
+    dateKey: startDateKey,
+    startDateKey,
+    endDateKeyExclusive,
+    year: baseYear,
+    month: baseMonth
+  };
+};
+let productReviewsSchemaReady = false;
+let productReviewsSchemaPromise = null;
+const ensureProductReviewsSchema = async () => {
+  if (productReviewsSchemaReady) return;
+  if (productReviewsSchemaPromise) {
+    await productReviewsSchemaPromise;
+    return;
+  }
+
+  productReviewsSchemaPromise = (async () => {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS product_reviews (
+        id SERIAL PRIMARY KEY,
+        product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        restaurant_id INTEGER REFERENCES restaurants(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+        comment TEXT,
+        is_deleted BOOLEAN DEFAULT false,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `).catch(() => {});
+
+    await pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_product_reviews_product_user
+      ON product_reviews(product_id, user_id)
+      WHERE user_id IS NOT NULL
+    `).catch(() => {});
+
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_product_reviews_product_created
+      ON product_reviews(product_id, created_at DESC)
+    `).catch(() => {});
+
+    productReviewsSchemaReady = true;
+  })();
+
+  try {
+    await productReviewsSchemaPromise;
+  } finally {
+    productReviewsSchemaPromise = null;
+  }
+};
+const ratioPercent = (part, total) => {
+  const denominator = Number(total || 0);
+  const numerator = Number(part || 0);
+  if (!denominator || denominator <= 0 || !Number.isFinite(denominator)) return 0;
+  if (!Number.isFinite(numerator) || numerator <= 0) return 0;
+  return Number(((numerator / denominator) * 100).toFixed(1));
+};
+
+const normalizeAdRepeatDays = (value) => {
+  let days = [];
+  if (Array.isArray(value)) {
+    days = value;
+  } else if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) days = parsed;
+    } catch (e) {
+      days = value.split(',').map((v) => v.trim());
+    }
+  }
+
+  const normalized = [...new Set(
+    days
+      .map((day) => Number.parseInt(day, 10))
+      .filter((day) => Number.isInteger(day) && day >= 0 && day <= 6)
+  )].sort((a, b) => a - b);
+
+  return normalized;
+};
+
+const normalizeAdTargetActivityTypeIds = (value) => {
+  let raw = [];
+  if (Array.isArray(value)) {
+    raw = value;
+  } else if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      raw = Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      raw = value.split(',').map((v) => v.trim());
+    }
+  }
+
+  return [...new Set(
+    raw
+      .map((id) => Number.parseInt(id, 10))
+      .filter((id) => Number.isInteger(id) && id > 0)
+  )].sort((a, b) => a - b);
+};
+
+const parseOptionalDate = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const getTashkentWeekday = (date = new Date()) => {
+  const dayName = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: TASHKENT_TZ })
+    .format(date)
+    .toLowerCase();
+  const map = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+  return map[dayName];
+};
+
+const isAdBannerVisibleNow = (banner, now = new Date()) => {
+  if (!banner || banner.is_deleted || !banner.is_enabled) return false;
+  const startAt = banner.start_at ? new Date(banner.start_at) : null;
+  const endAt = banner.end_at ? new Date(banner.end_at) : null;
+  if (startAt && now < startAt) return false;
+  if (endAt && now > endAt) return false;
+  const repeatDays = Array.isArray(banner.repeat_days) ? banner.repeat_days : normalizeAdRepeatDays(banner.repeat_days);
+  if (repeatDays.length > 0) {
+    const day = getTashkentWeekday(now);
+    if (!repeatDays.includes(day)) return false;
+  }
+  return true;
+};
+
+const getAdBannerStatus = (banner, now = new Date()) => {
+  if (banner.is_deleted) return 'deleted';
+  if (!banner.is_enabled) return 'disabled';
+  const startAt = banner.start_at ? new Date(banner.start_at) : null;
+  const endAt = banner.end_at ? new Date(banner.end_at) : null;
+  if (startAt && now < startAt) return 'scheduled';
+  if (endAt && now > endAt) return 'finished';
+  if (!isAdBannerVisibleNow(banner, now)) return 'paused_by_days';
+  return 'active';
+};
+
+const normalizeAdBannerPayload = (body) => {
+  const title = String(body.title || '').trim();
+  const imageUrl = String(body.image_url || '').trim();
+  const buttonText = String(body.button_text || 'Открыть').trim() || 'Открыть';
+  const targetUrl = String(body.target_url || '').trim();
+  const adType = String(body.ad_type || 'banner').trim().toLowerCase() || 'banner';
+  const slotOrder = Number.parseInt(body.slot_order, 10);
+  const displaySeconds = Number.parseInt(body.display_seconds, 10);
+  const transitionEffect = String(body.transition_effect || 'fade').trim().toLowerCase();
+  const startAt = parseOptionalDate(body.start_at);
+  const endAt = parseOptionalDate(body.end_at);
+  const repeatDays = normalizeAdRepeatDays(body.repeat_days);
+  const targetActivityTypeIds = normalizeAdTargetActivityTypeIds(body.target_activity_type_ids);
+  const isEnabled = body.is_enabled === undefined ? true : !!body.is_enabled;
+
+  if (!title) return { error: 'Укажите название рекламы' };
+  if (!imageUrl) return { error: 'Загрузите изображение рекламы' };
+  if (!imageUrl.startsWith('/uploads/')) {
+    try {
+      const parsedImageUrl = new URL(imageUrl);
+      if (!['http:', 'https:'].includes(parsedImageUrl.protocol)) {
+        return { error: 'Ссылка на изображение должна начинаться с /uploads/, http:// или https://' };
+      }
+    } catch (e) {
+      return { error: 'Некорректная ссылка изображения рекламы' };
+    }
+  }
+  if (targetUrl) {
+    try {
+      const parsedUrl = new URL(targetUrl);
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+        return { error: 'Ссылка должна начинаться с http:// или https://' };
+      }
+    } catch (e) {
+      return { error: 'Некорректная ссылка перехода' };
+    }
+  }
+  if (!Number.isInteger(slotOrder) || slotOrder < 1 || slotOrder > AD_BANNER_MAX_SLOTS) {
+    return { error: `Позиция слота должна быть от 1 до ${AD_BANNER_MAX_SLOTS}` };
+  }
+  if (!Number.isInteger(displaySeconds) || displaySeconds < 2 || displaySeconds > 60) {
+    return { error: 'Длительность показа должна быть от 2 до 60 секунд' };
+  }
+  if (!AD_TRANSITIONS.has(transitionEffect)) {
+    return { error: 'Некорректный тип анимации перехода' };
+  }
+  if (!AD_BANNER_TYPES.has(adType)) {
+    return { error: 'Некорректный тип показа рекламы' };
+  }
+  if ((body.start_at && !startAt) || (body.end_at && !endAt)) {
+    return { error: 'Некорректная дата начала или окончания' };
+  }
+  if (startAt && endAt && endAt <= startAt) {
+    return { error: 'Дата окончания должна быть позже даты начала' };
+  }
+
+  return {
+    title,
+    image_url: imageUrl,
+    button_text: buttonText,
+    target_url: targetUrl || null,
+    ad_type: adType,
+    slot_order: slotOrder,
+    display_seconds: displaySeconds,
+    transition_effect: transitionEffect,
+    start_at: startAt ? startAt.toISOString() : null,
+    end_at: endAt ? endAt.toISOString() : null,
+    repeat_days: repeatDays,
+    target_activity_type_ids: targetActivityTypeIds,
+    is_enabled: isEnabled
+  };
+};
+
+const findSiblingCategoryNameConflict = async ({
+  client,
+  parentId,
+  restaurantId,
+  nameRu,
+  nameUz,
+  excludeId = null
+}) => {
+  const siblings = await client.query(
+    `SELECT id, name_ru, name_uz
+     FROM categories
+     WHERE parent_id IS NOT DISTINCT FROM $1
+       AND restaurant_id IS NOT DISTINCT FROM $2
+       AND ($3::int IS NULL OR id <> $3)`,
+    [parentId, restaurantId, excludeId]
+  );
+
+  const targetRu = normalizeCategoryName(nameRu).toLowerCase();
+  const targetUz = normalizeCategoryName(nameUz).toLowerCase();
+
+  for (const sibling of siblings.rows) {
+    const siblingRu = normalizeCategoryName(sibling.name_ru).toLowerCase();
+    const siblingUz = normalizeCategoryName(sibling.name_uz).toLowerCase();
+
+    if (targetRu && siblingRu === targetRu) {
+      return { field: 'name_ru', existingId: sibling.id };
+    }
+
+    if (targetUz && siblingUz && siblingUz === targetUz) {
+      return { field: 'name_uz', existingId: sibling.id };
+    }
+  }
+
+  return null;
+};
+
+const getCategoryLevelById = async (client, categoryId, disallowId = null) => {
+  let level = 0;
+  let currentId = normalizeCategoryId(categoryId);
+  const visited = new Set();
+  const forbiddenId = normalizeCategoryId(disallowId);
+
+  while (currentId) {
+    if (visited.has(currentId)) {
+      throw new Error('CATEGORY_CYCLE');
+    }
+    if (forbiddenId && currentId === forbiddenId) {
+      throw new Error('CATEGORY_CYCLE');
+    }
+    visited.add(currentId);
+
+    const result = await client.query(
+      'SELECT id, parent_id FROM categories WHERE id = $1',
+      [currentId]
+    );
+
+    if (result.rows.length === 0) {
+      throw new Error('CATEGORY_NOT_FOUND');
+    }
+
+    level += 1;
+    if (level > CATEGORY_CHAIN_GUARD_LIMIT) {
+      throw new Error('CATEGORY_CHAIN_TOO_DEEP');
+    }
+
+    currentId = normalizeCategoryId(result.rows[0].parent_id);
+  }
+
+  return level;
+};
+
+const getCategorySubtreeDepth = async (client, categoryId) => {
+  const result = await client.query(`
+    WITH RECURSIVE category_tree AS (
+      SELECT id, parent_id, 1 AS depth
+      FROM categories
+      WHERE id = $1
+
+      UNION ALL
+
+      SELECT c.id, c.parent_id, ct.depth + 1
+      FROM categories c
+      INNER JOIN category_tree ct ON c.parent_id = ct.id
+      WHERE ct.depth < $2
+    )
+    SELECT COALESCE(MAX(depth), 1)::int AS max_depth
+    FROM category_tree
+  `, [categoryId, CATEGORY_CHAIN_GUARD_LIMIT]);
+
+  return result.rows[0]?.max_depth || 1;
+};
+
+
+// =====================================================
+// РЕСТОРАНЫ
+// =====================================================
+
+// Получить все рестораны
+router.get('/restaurants', async (req, res) => {
+  try {
+    await ensureActivityTypesSchema();
+    await ensureRestaurantCurrencySchema();
+    await ensureRestaurantAdminCommentSchema();
+    await ensureRestaurantWorkflowStatusSchema();
+    await ensureRestaurantGuvohnomaSchema();
+    await ensureRestaurantShowContactsSchema();
+    await ensureRestaurantNamePolicy();
+    await ensureReservationSchema();
+    const parsedPage = Number.parseInt(req.query.page, 10);
+    const parsedLimit = Number.parseInt(req.query.limit, 10);
+    const page = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+    const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 500) : 20;
+    const offset = (page - 1) * limit;
+    const compact = ['1', 'true', 'yes'].includes(String(req.query.compact || '').trim().toLowerCase());
+    const params = [];
+    const where = [];
+
+    const search = String(req.query.search || '').trim();
+    if (search) {
+      params.push(`%${search}%`);
+      const nameIdParam = params.length;
+      // Bot usernames are stored without a leading "@"; strip it so a query like
+      // "@mybot" still matches.
+      params.push(`%${search.replace(/^@+/, '')}%`);
+      const botParam = params.length;
+      where.push(`(r.name ILIKE $${nameIdParam} OR CAST(r.id AS TEXT) ILIKE $${nameIdParam} OR r.telegram_bot_username ILIKE $${botParam})`);
+    }
+
+    const status = String(req.query.status || '').trim().toLowerCase();
+    if (status === 'active') where.push('r.is_active = true');
+    if (status === 'inactive') where.push('r.is_active = false');
+
+    const activityTypeRaw = String(req.query.activity_type_id || '').trim().toLowerCase();
+    if (activityTypeRaw === 'none') {
+      where.push('r.activity_type_id IS NULL');
+    } else if (activityTypeRaw) {
+      const activityTypeId = Number.parseInt(activityTypeRaw, 10);
+      if (Number.isFinite(activityTypeId) && activityTypeId > 0) {
+        params.push(activityTypeId);
+        where.push(`r.activity_type_id = $${params.length}`);
+      }
+    }
+
+    const workflowStatus = parseRestaurantWorkflowStatus(req.query.workflow_status);
+    if (workflowStatus) {
+      params.push(workflowStatus);
+      where.push(`r.workflow_status = $${params.length}`);
+    }
+    const autoInactiveRequested = ['1', 'true', 'yes'].includes(String(req.query.auto_inactive || '').trim().toLowerCase());
+    if (autoInactiveRequested) {
+      where.push(`(
+        r.is_active = false
+        OR LOWER(COALESCE(to_jsonb(r)->>'telegram_bot_meta_error', '')) LIKE '%401%'
+        OR LOWER(COALESCE(to_jsonb(r)->>'telegram_bot_meta_error', '')) LIKE '%403%'
+        OR LOWER(COALESCE(to_jsonb(r)->>'telegram_bot_meta_error', '')) LIKE '%404%'
+        OR LOWER(COALESCE(to_jsonb(r)->>'telegram_bot_meta_error', '')) LIKE '%unauthorized%'
+        OR LOWER(COALESCE(to_jsonb(r)->>'telegram_bot_meta_error', '')) LIKE '%forbidden%'
+        OR LOWER(COALESCE(to_jsonb(r)->>'telegram_bot_meta_error', '')) LIKE '%not found%'
+        OR LOWER(COALESCE(to_jsonb(r)->>'telegram_bot_meta_error', '')) LIKE '%bot was blocked%'
+        OR LOWER(COALESCE(to_jsonb(r)->>'telegram_bot_meta_error', '')) LIKE '%deactivated%'
+        OR COALESCE((
+          SELECT MAX(u.last_activity_at)
+          FROM operator_restaurants opr
+          INNER JOIN users u ON u.id = opr.user_id
+          WHERE opr.restaurant_id = r.id
+            AND u.role = 'operator'
+        ), r.created_at) <= (CURRENT_TIMESTAMP - INTERVAL '30 days')
+      )`);
+    }
+
+    const createdFrom = String(req.query.created_from || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(createdFrom)) {
+      params.push(createdFrom);
+      where.push(`r.created_at::date >= $${params.length}::date`);
+    }
+
+    const createdTo = String(req.query.created_to || '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(createdTo)) {
+      params.push(createdTo);
+      where.push(`r.created_at::date <= $${params.length}::date`);
+    }
+
+    const tariff = String(req.query.tariff || '').trim().toLowerCase();
+    if (tariff === 'free') where.push('r.is_free_tier = true');
+    if (tariff === 'paid') where.push('COALESCE(r.is_free_tier, false) = false');
+    const products = String(req.query.products || '').trim().toLowerCase();
+    if (products === 'with_products') {
+      where.push('EXISTS (SELECT 1 FROM products p WHERE p.restaurant_id = r.id)');
+    }
+    if (products === 'without_products') {
+      where.push('NOT EXISTS (SELECT 1 FROM products p WHERE p.restaurant_id = r.id)');
+    }
+
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const countResult = await pool.query(`
+      SELECT COUNT(*)::int AS total
+      FROM restaurants r
+      ${whereSql}
+    `, params);
+    const total = Number(countResult.rows[0]?.total || 0);
+
+    if (compact) {
+      const compactParams = [...params, limit, offset];
+      const compactResult = await pool.query(`
+        WITH r_compact AS (
+          SELECT
+            r.id,
+            r.name,
+            r.is_active,
+            r.activity_type_id,
+            r.created_at,
+            r.is_free_tier,
+            r.latitude,
+            r.longitude,
+            r.phone,
+            r.balance,
+            r.currency_code
+          FROM restaurants r
+          ${whereSql}
+          ORDER BY r.created_at DESC, r.id DESC
+          LIMIT $${compactParams.length - 1}
+          OFFSET $${compactParams.length}
+        ),
+        product_counts AS (
+          SELECT restaurant_id, COUNT(*)::int AS products_count
+          FROM products
+          GROUP BY restaurant_id
+        )
+        SELECT
+          r_compact.*,
+          COALESCE(pc.products_count, 0) AS products_count
+        FROM r_compact
+        LEFT JOIN product_counts pc ON pc.restaurant_id = r_compact.id
+        ORDER BY r_compact.created_at DESC, r_compact.id DESC
+      `, compactParams);
+      return res.json({
+        restaurants: compactResult.rows || [],
+        total,
+        page,
+        limit
+      });
+    }
+
+    const listParams = [...params, limit, offset];
+    const result = await pool.query(`
+      WITH r_page AS (
+        SELECT r.*
+        FROM restaurants r
+        ${whereSql}
+        ORDER BY r.created_at DESC, r.id DESC
+        LIMIT $${listParams.length - 1}
+        OFFSET $${listParams.length}
+      ),
+      operator_counts AS (
+        SELECT
+          opr.restaurant_id,
+          COUNT(*)::int AS operators_count,
+          COUNT(*) FILTER (WHERE u.role = 'operator' AND u.is_active = true)::int AS active_operators_count,
+          MAX(u.last_activity_at) FILTER (WHERE u.role = 'operator') AS latest_operator_activity_at
+        FROM operator_restaurants opr
+        LEFT JOIN users u ON u.id = opr.user_id
+        GROUP BY opr.restaurant_id
+      ),
+      order_counts AS (
+        SELECT restaurant_id, COUNT(*)::int AS orders_count
+        FROM orders
+        GROUP BY restaurant_id
+      ),
+      product_counts AS (
+        SELECT restaurant_id, COUNT(*)::int AS products_count
+        FROM products
+        GROUP BY restaurant_id
+      )
+      SELECT
+        r_page.*,
+        bat.name AS activity_type_name,
+        bat.is_visible AS activity_type_is_visible,
+        COALESCE(rs.enabled, false) AS reservation_enabled_setting,
+        COALESCE(rs.reservation_service_cost, COALESCE(r_page.reservation_cost, 0)) AS reservation_service_cost,
+        op.full_name AS primary_operator_full_name,
+        op.phone AS primary_operator_phone,
+        op.username AS primary_operator_username,
+        op.telegram_id AS primary_operator_telegram_id,
+        op.last_activity_at AS primary_operator_last_activity_at,
+        COALESCE(oc.operators_count, 0) AS operators_count,
+        COALESCE(orc.orders_count, 0) AS orders_count,
+        COALESCE(pc.products_count, 0) AS products_count,
+        oc.latest_operator_activity_at,
+        COALESCE(oc.active_operators_count, 0) AS active_operators_count,
+        COALESCE(gf.guvohnoma_files, '[]'::jsonb) AS guvohnoma_files
+      FROM r_page
+      LEFT JOIN business_activity_types bat ON bat.id = r_page.activity_type_id
+      LEFT JOIN restaurant_reservation_settings rs ON rs.restaurant_id = r_page.id
+      LEFT JOIN operator_counts oc ON oc.restaurant_id = r_page.id
+      LEFT JOIN order_counts orc ON orc.restaurant_id = r_page.id
+      LEFT JOIN product_counts pc ON pc.restaurant_id = r_page.id
+      LEFT JOIN LATERAL (
+        SELECT jsonb_agg(
+          jsonb_build_object(
+            'id', rgf.id,
+            'file_url', rgf.file_url,
+            'file_name', rgf.file_name,
+            'file_mime', rgf.file_mime,
+            'file_size', rgf.file_size,
+            'uploaded_by_id', rgf.uploaded_by_id,
+            'uploaded_by_name', rgf.uploaded_by_name,
+            'created_at', rgf.created_at
+          )
+          ORDER BY rgf.created_at DESC, rgf.id DESC
+        ) AS guvohnoma_files
+        FROM restaurant_guvohnoma_files rgf
+        WHERE rgf.restaurant_id = r_page.id
+      ) gf ON true
+      LEFT JOIN LATERAL (
+        SELECT
+          u.full_name,
+          u.phone,
+          u.username,
+          u.telegram_id,
+          u.last_activity_at
+        FROM operator_restaurants opr
+        INNER JOIN users u ON u.id = opr.user_id
+        WHERE opr.restaurant_id = r_page.id
+          AND u.role = 'operator'
+        ORDER BY COALESCE(u.last_activity_at, u.created_at) DESC NULLS LAST, u.id DESC
+        LIMIT 1
+      ) op ON true
+      ORDER BY r_page.created_at DESC, r_page.id DESC
+    `, listParams);
+    const restaurants = await Promise.all(result.rows.map(async (row) => {
+      const restaurantWithBotMeta = await enrichRestaurantWithBotMeta({
+        ...row,
+        reservation_enabled: row.reservation_enabled_setting === true || row.reservation_enabled_setting === 'true'
+      });
+      return enrichRestaurantWithWorkflowStatus(restaurantWithBotMeta);
+    }));
+    res.json({
+      restaurants,
+      total,
+      page,
+      limit
+    });
+  } catch (error) {
+    console.error('Get restaurants error:', error);
+    res.status(500).json({ error: 'Ошибка получения ресторанов' });
+  }
+});
+
+// Диагностика Telegram-интеграции магазина (ошибки/чеклист)
+router.get('/restaurants/:id/telegram-diagnostics', async (req, res) => {
+  try {
+    const restaurantId = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(restaurantId) || restaurantId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID магазина' });
+    }
+
+    const result = await pool.query(
+      `SELECT id, name, telegram_bot_token
+       FROM restaurants
+       WHERE id = $1
+       LIMIT 1`,
+      [restaurantId]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'Магазин не найден' });
+    }
+
+    const diagnostics = await buildRestaurantTelegramDiagnostics(result.rows[0]);
+    res.json(diagnostics);
+  } catch (error) {
+    console.error('Restaurant telegram diagnostics error:', error);
+    res.status(500).json({ error: 'Ошибка диагностики Telegram-интеграции' });
+  }
+});
+
+// =====================================================
+// СПРАВОЧНИК ВИДОВ ДЕЯТЕЛЬНОСТИ
+// =====================================================
+
+router.get('/activity-types', async (req, res) => {
+  try {
+    await ensureActivityTypesSchema();
+    const includeHidden = String(req.query.include_hidden || '').trim() === 'true';
+
+    const result = await pool.query(`
+      SELECT
+        bat.*,
+        (SELECT COUNT(*) FROM restaurants r WHERE r.activity_type_id = bat.id) AS restaurants_count
+      FROM business_activity_types bat
+      ${includeHidden ? '' : 'WHERE bat.is_visible = true'}
+      ORDER BY bat.sort_order ASC, bat.name ASC, bat.id ASC
+    `);
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Get activity types error:', error);
+    res.status(500).json({ error: 'Ошибка получения видов деятельности' });
+  }
+});
+
+router.post('/activity-types', async (req, res) => {
+  try {
+    await ensureActivityTypesSchema();
+    const name = String(req.body?.name || '').trim();
+    const sortOrder = Number.isFinite(Number(req.body?.sort_order)) ? parseInt(req.body.sort_order, 10) : 0;
+    const isVisible = req.body?.is_visible !== undefined ? !!req.body.is_visible : true;
+
+    if (!name) {
+      return res.status(400).json({ error: 'Название вида деятельности обязательно' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO business_activity_types (name, sort_order, is_visible)
+       VALUES ($1, $2, $3)
+       RETURNING *`,
+      [name, sortOrder, isVisible]
+    );
+
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    if (error?.code === '23505') {
+      return res.status(409).json({ error: 'Такой вид деятельности уже существует' });
+    }
+    console.error('Create activity type error:', error);
+    res.status(500).json({ error: 'Ошибка создания вида деятельности' });
+  }
+});
+
+router.put('/activity-types/:id', async (req, res) => {
+  try {
+    await ensureActivityTypesSchema();
+    const activityTypeId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(activityTypeId) || activityTypeId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID вида деятельности' });
+    }
+
+    const updates = [];
+    const params = [];
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'name')) {
+      const name = String(req.body.name || '').trim();
+      if (!name) {
+        return res.status(400).json({ error: 'Название вида деятельности обязательно' });
+      }
+      params.push(name);
+      updates.push(`name = $${params.length}`);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'sort_order')) {
+      params.push(Number.isFinite(Number(req.body.sort_order)) ? parseInt(req.body.sort_order, 10) : 0);
+      updates.push(`sort_order = $${params.length}`);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'is_visible')) {
+      params.push(!!req.body.is_visible);
+      updates.push(`is_visible = $${params.length}`);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'Нет данных для обновления' });
+    }
+
+    updates.push('updated_at = CURRENT_TIMESTAMP');
+    params.push(activityTypeId);
+
+    const result = await pool.query(
+      `UPDATE business_activity_types
+       SET ${updates.join(', ')}
+       WHERE id = $${params.length}
+       RETURNING *`,
+      params
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Вид деятельности не найден' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    if (error?.code === '23505') {
+      return res.status(409).json({ error: 'Такой вид деятельности уже существует' });
+    }
+    console.error('Update activity type error:', error);
+    res.status(500).json({ error: 'Ошибка обновления вида деятельности' });
+  }
+});
+
+router.patch('/activity-types/:id/visibility', async (req, res) => {
+  try {
+    await ensureActivityTypesSchema();
+    const activityTypeId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(activityTypeId) || activityTypeId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID вида деятельности' });
+    }
+
+    const result = await pool.query(
+      `UPDATE business_activity_types
+       SET is_visible = $1, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2
+       RETURNING *`,
+      [!!req.body?.is_visible, activityTypeId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Вид деятельности не найден' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Toggle activity type visibility error:', error);
+    res.status(500).json({ error: 'Ошибка изменения отображения вида деятельности' });
+  }
+});
+
+// =====================================================
+// БИЛЛИНГ И БАЛАНС (СУПЕРАДМИН)
+// =====================================================
+
+// =====================================================
+// ШАБЛОНЫ МЕБЕЛИ БРОНИРОВАНИЯ (СУПЕРАДМИН)
+// =====================================================
+
+router.get('/reservation-table-templates', async (req, res) => {
+  try {
+    await ensureActivityTypesSchema();
+    await ensureReservationSchema();
+    const result = await pool.query(`
+      SELECT
+        tpl.*,
+        bat.name AS activity_type_name,
+        (
+          SELECT COUNT(*)
+          FROM reservation_tables t
+          WHERE t.template_id = tpl.id
+        ) AS tables_count
+      FROM reservation_table_templates tpl
+      LEFT JOIN business_activity_types bat ON bat.id = tpl.activity_type_id
+      ORDER BY tpl.is_system DESC, tpl.name ASC, tpl.id ASC
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Get reservation templates (superadmin) error:', error);
+    res.status(500).json({ error: 'Ошибка получения шаблонов элементов' });
+  }
+});
+
+router.post('/reservation-table-templates', async (req, res) => {
+  try {
+    await ensureActivityTypesSchema();
+    await ensureReservationSchema();
+    const name = String(req.body?.name || '').trim();
+    const imageUrl = normalizeReservationTemplateImageUrl(req.body?.image_url);
+    const shape = normalizeReservationTemplateShape(req.body?.shape, 'custom');
+    const furnitureCategory = normalizeReservationFurnitureCategory(req.body?.furniture_category, 'tables_chairs');
+    const activityTypeId = normalizeActivityTypeId(req.body?.activity_type_id);
+    const seatsCount = Math.max(1, parseReservationTemplateInt(req.body?.seats_count, 2));
+    const width = Math.max(0.2, parseReservationTemplateFloat(req.body?.width, 1));
+    const height = Math.max(0.2, parseReservationTemplateFloat(req.body?.height, 1));
+
+    if (!name) {
+      return res.status(400).json({ error: 'Название элемента обязательно' });
+    }
+    if (!imageUrl) {
+      return res.status(400).json({ error: 'Изображение элемента обязательно' });
+    }
+    if (activityTypeId) {
+      const activityTypeResult = await pool.query(
+        'SELECT id FROM business_activity_types WHERE id = $1 LIMIT 1',
+        [activityTypeId]
+      );
+      if (!activityTypeResult.rows.length) {
+        return res.status(400).json({ error: 'Выбранный вид деятельности не найден' });
+      }
+    }
+
+    let code = normalizeReservationTemplateCode(req.body?.code || name);
+    if (!code) {
+      code = generateReservationTemplateCode(name);
+    }
+
+    const tryInsert = async (codeValue) => pool.query(
+      `INSERT INTO reservation_table_templates (
+         code, name, shape, image_url, furniture_category, activity_type_id, seats_count, width, height, is_system
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
+       RETURNING *`,
+      [codeValue, name, shape, imageUrl, furnitureCategory, activityTypeId, seatsCount, width, height]
+    );
+
+    try {
+      const result = await tryInsert(code);
+      return res.status(201).json(result.rows[0]);
+    } catch (error) {
+      if (error?.code !== '23505') throw error;
+      const result = await tryInsert(generateReservationTemplateCode(name));
+      return res.status(201).json(result.rows[0]);
+    }
+  } catch (error) {
+    console.error('Create reservation template (superadmin) error:', error);
+    res.status(500).json({ error: 'Ошибка создания шаблона элемента' });
+  }
+});
+
+router.put('/reservation-table-templates/:id', async (req, res) => {
+  try {
+    await ensureActivityTypesSchema();
+    await ensureReservationSchema();
+    const templateId = parseReservationTemplateInt(req.params.id, 0);
+    if (!templateId) {
+      return res.status(400).json({ error: 'Некорректный ID шаблона' });
+    }
+
+    const existingResult = await pool.query(
+      'SELECT id, is_system FROM reservation_table_templates WHERE id = $1 LIMIT 1',
+      [templateId]
+    );
+    if (!existingResult.rows.length) {
+      return res.status(404).json({ error: 'Шаблон не найден' });
+    }
+
+    const updates = [];
+    const params = [];
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'name')) {
+      const name = String(req.body?.name || '').trim();
+      if (!name) {
+        return res.status(400).json({ error: 'Название элемента обязательно' });
+      }
+      params.push(name);
+      updates.push(`name = $${params.length}`);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'shape')) {
+      params.push(normalizeReservationTemplateShape(req.body?.shape, 'custom'));
+      updates.push(`shape = $${params.length}`);
+    }
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'furniture_category')) {
+      params.push(normalizeReservationFurnitureCategory(req.body?.furniture_category, 'tables_chairs'));
+      updates.push(`furniture_category = $${params.length}`);
+    }
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'activity_type_id')) {
+      const activityTypeId = normalizeActivityTypeId(req.body?.activity_type_id);
+      if (activityTypeId) {
+        const activityTypeResult = await pool.query(
+          'SELECT id FROM business_activity_types WHERE id = $1 LIMIT 1',
+          [activityTypeId]
+        );
+        if (!activityTypeResult.rows.length) {
+          return res.status(400).json({ error: 'Выбранный вид деятельности не найден' });
+        }
+      }
+      params.push(activityTypeId);
+      updates.push(`activity_type_id = $${params.length}`);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'seats_count')) {
+      params.push(Math.max(1, parseReservationTemplateInt(req.body?.seats_count, 2)));
+      updates.push(`seats_count = $${params.length}`);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'width')) {
+      params.push(Math.max(0.2, parseReservationTemplateFloat(req.body?.width, 1)));
+      updates.push(`width = $${params.length}`);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'height')) {
+      params.push(Math.max(0.2, parseReservationTemplateFloat(req.body?.height, 1)));
+      updates.push(`height = $${params.length}`);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'image_url')) {
+      const imageUrl = normalizeReservationTemplateImageUrl(req.body?.image_url);
+      if (!imageUrl) {
+        return res.status(400).json({ error: 'Изображение элемента обязательно' });
+      }
+      params.push(imageUrl);
+      updates.push(`image_url = $${params.length}`);
+    }
+
+    if (!updates.length) {
+      return res.status(400).json({ error: 'Нет данных для обновления' });
+    }
+
+    updates.push('updated_at = CURRENT_TIMESTAMP');
+    params.push(templateId);
+    const result = await pool.query(
+      `UPDATE reservation_table_templates
+       SET ${updates.join(', ')}
+       WHERE id = $${params.length}
+       RETURNING *`,
+      params
+    );
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Update reservation template (superadmin) error:', error);
+    res.status(500).json({ error: 'Ошибка обновления шаблона элемента' });
+  }
+});
+
+router.delete('/reservation-table-templates/:id', async (req, res) => {
+  try {
+    await ensureReservationSchema();
+    const templateId = parseReservationTemplateInt(req.params.id, 0);
+    if (!templateId) {
+      return res.status(400).json({ error: 'Некорректный ID шаблона' });
+    }
+
+    const existingResult = await pool.query(
+      'SELECT id, is_system, name FROM reservation_table_templates WHERE id = $1 LIMIT 1',
+      [templateId]
+    );
+    if (!existingResult.rows.length) {
+      return res.status(404).json({ error: 'Шаблон не найден' });
+    }
+    if (existingResult.rows[0].is_system) {
+      return res.status(403).json({ error: 'Системный шаблон удалить нельзя' });
+    }
+
+    const usageResult = await pool.query(
+      'SELECT COUNT(*)::int AS total FROM reservation_tables WHERE template_id = $1',
+      [templateId]
+    );
+    const usageCount = Number(usageResult.rows[0]?.total || 0);
+    if (usageCount > 0) {
+      return res.status(409).json({ error: 'Шаблон используется в столах. Сначала отвяжите его от столов.' });
+    }
+
+    await pool.query('DELETE FROM reservation_table_templates WHERE id = $1', [templateId]);
+    res.json({ message: 'Шаблон удален' });
+  } catch (error) {
+    console.error('Delete reservation template (superadmin) error:', error);
+    res.status(500).json({ error: 'Ошибка удаления шаблона' });
+  }
+});
+
+// Получить глобальные настройки биллинга (реквизиты)
+router.get('/billing-settings', async (req, res) => {
+  try {
+    await ensureBillingSettingsSchema();
+    const result = await pool.query('SELECT * FROM billing_settings WHERE id = 1');
+    const payload = await enrichBillingSettingsWithCentralBotMeta(result.rows[0] || {});
+    res.json(payload);
+  } catch (error) {
+    console.error('Get billing settings error:', error);
+    res.status(500).json({ error: 'Ошибка получения настроек биллинга' });
+  }
+});
+
+// Обновить глобальные настройки биллинга
+router.put('/billing-settings', async (req, res) => {
+  try {
+    await ensureBillingSettingsSchema();
+    const {
+      card_number, card_holder, phone_number, telegram_username,
+      click_link, payme_link,
+      default_starting_balance, default_order_cost,
+      superadmin_bot_token,
+      superadmin_telegram_id,
+      server_group_chat_id,
+      server_stats_interval_ms,
+      server_railway_projects,
+      catalog_animation_season,
+      ai_enabled,
+      ai_category_suggest_enabled,
+      print_form_background_url,
+      print_form_qr_position,
+      print_form_caption_ru,
+      print_form_caption_uz
+    } = req.body;
+
+    const normalizedTokenInput = normalizeTokenValue(superadmin_bot_token);
+    const normalizedSuperadminTelegramIdInput = normalizeTelegramIdValue(superadmin_telegram_id);
+    const normalizedServerGroupChatIdInput = normalizeTelegramIdValue(server_group_chat_id);
+    const normalizedServerStatsIntervalMs = normalizeStatsInterval(server_stats_interval_ms, null);
+    const normalizedServerRailwayProjects = String(server_railway_projects || '').trim();
+    const normalizedCatalogAnimationSeason = normalizeCatalogAnimationSeason(catalog_animation_season, 'off');
+    const normalizedAiEnabled = normalizeBooleanFlag(ai_enabled, true);
+    const normalizedAiCategorySuggestEnabled = normalizeBooleanFlag(ai_category_suggest_enabled, false);
+    const normalizedPrintFormSettings = normalizePrintFormSettingsPayload({
+      print_form_background_url,
+      print_form_qr_position,
+      print_form_caption_ru,
+      print_form_caption_uz
+    });
+    const previousSettings = await pool.query('SELECT * FROM billing_settings WHERE id = 1');
+    const previousSettingsRow = previousSettings.rows[0] || {};
+    const previousToken = normalizeTokenValue(previousSettingsRow.superadmin_bot_token);
+    const previousSuperadminTelegramId = normalizeTelegramIdValue(previousSettingsRow.superadmin_telegram_id);
+    const previousServerGroupChatId = normalizeTelegramIdValue(previousSettingsRow.server_group_chat_id);
+    const normalizedToken = normalizedTokenInput ?? previousToken;
+    const normalizedSuperadminTelegramId = normalizedSuperadminTelegramIdInput ?? previousSuperadminTelegramId;
+    const normalizedServerGroupChatId = normalizedServerGroupChatIdInput ?? previousServerGroupChatId;
+    const normalizedCardNumber = normalizePreservedText(card_number, previousSettingsRow.card_number, { digitsOnly: true });
+    const normalizedCardHolder = normalizePreservedText(card_holder, previousSettingsRow.card_holder);
+    const normalizedPhoneNumber = normalizePreservedText(phone_number, previousSettingsRow.phone_number);
+    const normalizedTelegramUsername = normalizePreservedText(telegram_username, previousSettingsRow.telegram_username);
+    const normalizedClickLink = normalizePreservedText(click_link, previousSettingsRow.click_link);
+    const normalizedPaymeLink = normalizePreservedText(payme_link, previousSettingsRow.payme_link);
+    const normalizedDefaultStartingBalance = normalizePreservedNumber(
+      default_starting_balance,
+      previousSettingsRow.default_starting_balance,
+      100000
+    );
+    const normalizedDefaultOrderCost = normalizePreservedNumber(
+      parseFlexibleAmount(default_order_cost, Number.NaN),
+      previousSettingsRow.default_order_cost,
+      1000
+    );
+
+    const result = await pool.query(`
+      UPDATE billing_settings 
+      SET card_number = $1, card_holder = $2, phone_number = $3, 
+          telegram_username = $4, click_link = $5, payme_link = $6,
+          default_starting_balance = $7, default_order_cost = $8,
+          superadmin_bot_token = $9,
+          superadmin_telegram_id = $10,
+          server_group_chat_id = $11,
+          server_stats_interval_ms = COALESCE($12, server_stats_interval_ms, 1800000),
+          server_railway_projects = $13,
+          catalog_animation_season = $14,
+          ai_enabled = $15,
+          print_form_background_url = $16,
+          print_form_qr_position = $17,
+          print_form_caption_ru = $18,
+          print_form_caption_uz = $19,
+          ai_category_suggest_enabled = $20,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1
+      RETURNING *
+    `, [
+      normalizedCardNumber,
+      normalizedCardHolder,
+      normalizedPhoneNumber,
+      normalizedTelegramUsername,
+      normalizedClickLink,
+      normalizedPaymeLink,
+      normalizedDefaultStartingBalance,
+      normalizedDefaultOrderCost,
+      normalizedToken,
+      normalizedSuperadminTelegramId,
+      normalizedServerGroupChatId,
+      normalizedServerStatsIntervalMs,
+      normalizedServerRailwayProjects,
+      normalizedCatalogAnimationSeason,
+      normalizedAiEnabled,
+      normalizedPrintFormSettings.print_form_background_url,
+      normalizedPrintFormSettings.print_form_qr_position,
+      normalizedPrintFormSettings.print_form_caption_ru,
+      normalizedPrintFormSettings.print_form_caption_uz,
+      normalizedAiCategorySuggestEnabled
+    ]);
+    await appendBillingSettingsHistory({
+      before: previousSettingsRow,
+      after: result.rows[0] || null,
+      userId: req.user?.id,
+      source: '/billing-settings'
+    });
+
+    try {
+      await reloadBot();
+    } catch (reloadErr) {
+      console.error('Bot reload warning after settings update:', reloadErr.message);
+    }
+    await refreshSuperadminServerMonitoringSchedule().catch((scheduleErr) => {
+      console.error('Server monitoring schedule refresh warning:', scheduleErr?.message || scheduleErr);
+    });
+
+    if (normalizedToken && normalizedToken !== previousToken) {
+      try {
+        const notificationTargetId = normalizeTelegramIdValue(result.rows[0]?.superadmin_telegram_id) || req.user.telegram_id;
+        await notifySuperadminTokenChanged(notificationTargetId);
+      } catch (notifyErr) {
+        console.error('Bot token change notification warning:', notifyErr.message);
+      }
+    }
+
+    const payload = await enrichBillingSettingsWithCentralBotMeta(result.rows[0]);
+    res.json(payload);
+  } catch (error) {
+    console.error('Update billing settings error:', error);
+    res.status(500).json({ error: 'Ошибка обновления настроек биллинга' });
+  }
+});
+
+router.post('/billing-settings/send-server-report', async (req, res) => {
+  try {
+    const { targetChatId } = await sendServerReportUsingBillingSettings({
+      lang: req.body?.lang
+    });
+    res.json({
+      success: true,
+      target_chat_id: targetChatId,
+      message: 'Отчёт сервера отправлен'
+    });
+  } catch (error) {
+    if (error?.code === 'CENTRAL_BOT_TOKEN_REQUIRED') {
+      return res.status(400).json({ error: 'Сначала укажите токен центрального Telegram-бота' });
+    }
+    if (error?.code === 'SERVER_GROUP_CHAT_ID_REQUIRED') {
+      return res.status(400).json({ error: 'Сначала заполните server group chat id' });
+    }
+    console.error('Send server report error:', error);
+    return res.status(500).json({ error: 'Не удалось отправить отчёт сервера' });
+  }
+});
+
+// Пополнить баланс ресторана вручную
+// Categories of superadmin store payments. 'balance' tops up the store balance,
+// the others are just recorded as founder income without changing the balance.
+const STORE_PAYMENT_CATEGORIES = ['balance', 'store_opening', 'advertising'];
+const STORE_PAYMENT_DEFAULT_DESCRIPTIONS = {
+  balance: 'Ручное пополнение суперадмином',
+  store_opening: 'Оплата за открытие магазина',
+  advertising: 'Оплата за рекламу'
+};
+let billingTransactionsCategoryReady = false;
+const ensureBillingTransactionsCategory = async () => {
+  if (billingTransactionsCategoryReady) return;
+  await pool
+    .query(`ALTER TABLE billing_transactions ADD COLUMN IF NOT EXISTS payment_category VARCHAR(32)`)
+    .catch(() => {});
+  billingTransactionsCategoryReady = true;
+};
+
+router.post('/restaurants/:id/topup', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await ensureBillingTransactionsCategory();
+    const { amount, description } = req.body;
+    const restaurantId = req.params.id;
+    const amountValue = Number(amount);
+
+    const rawCategory = String(req.body.category || 'balance').trim().toLowerCase();
+    const category = STORE_PAYMENT_CATEGORIES.includes(rawCategory) ? rawCategory : 'balance';
+    const isBalanceTopup = category === 'balance';
+
+    if (!Number.isFinite(amountValue) || amountValue <= 0) {
+      return res.status(400).json({ error: 'Некорректная сумма пополнения' });
+    }
+
+    await client.query('BEGIN');
+
+    let restaurantRow;
+    if (isBalanceTopup) {
+      // Update restaurant balance
+      const updatedRest = await client.query(`
+        UPDATE restaurants
+        SET balance = balance + $1
+        WHERE id = $2
+        RETURNING id, name, balance, currency_code
+      `, [amountValue, restaurantId]);
+
+      if (updatedRest.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Ресторан не найден' });
+      }
+      restaurantRow = updatedRest.rows[0];
+    } else {
+      // Store opening / advertising payment: record income without touching the balance
+      const restRes = await client.query(
+        'SELECT id, name, balance, currency_code FROM restaurants WHERE id = $1',
+        [restaurantId]
+      );
+      if (restRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Ресторан не найден' });
+      }
+      restaurantRow = restRes.rows[0];
+    }
+
+    const transactionType = isBalanceTopup ? 'deposit' : 'store_payment';
+    const finalDescription = (description && String(description).trim())
+      ? String(description).trim()
+      : STORE_PAYMENT_DEFAULT_DESCRIPTIONS[category];
+
+    // Record transaction
+    const transactionResult = await client.query(`
+      INSERT INTO billing_transactions (restaurant_id, user_id, amount, type, description, payment_category)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id, restaurant_id, user_id, amount, type, description, payment_category, created_at
+    `, [restaurantId, req.user.id, amountValue, transactionType, finalDescription, category]);
+
+    await client.query('COMMIT');
+
+    // Notify operators in Telegram only for actual balance top-ups
+    if (isBalanceTopup) {
+      try {
+        const operators = await pool.query(`
+          SELECT COALESCE(u.telegram_id, tal.telegram_id) AS telegram_id, u.full_name
+          FROM users u
+          INNER JOIN operator_restaurants opr ON u.id = opr.user_id
+          LEFT JOIN telegram_admin_links tal ON tal.user_id = u.id
+          WHERE opr.restaurant_id = $1 AND COALESCE(u.telegram_id, tal.telegram_id) IS NOT NULL
+        `, [restaurantId]);
+
+        for (const op of operators.rows) {
+          await sendBalanceNotification(
+            op.telegram_id,
+            amountValue,
+            restaurantRow.balance,
+            null,
+            {
+              restaurantId,
+              currencyCode: restaurantRow.currency_code
+            }
+          );
+        }
+      } catch (notifErr) {
+        console.error('Notification error on topup:', notifErr.message);
+      }
+    }
+
+    res.json({
+      ...restaurantRow,
+      transaction: transactionResult.rows[0] || null
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Restaurant topup error:', error);
+    res.status(500).json({ error: 'Ошибка пополнения баланса' });
+  } finally {
+    client.release();
+  }
+});
+
+// История операций по балансу ресторана
+router.get('/restaurants/:id/billing-transactions', async (req, res) => {
+  try {
+    await ensureBillingTransactionsCategory();
+    const restaurantId = req.params.id;
+    const parsedLimit = Number.parseInt(req.query.limit, 10);
+    const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 200) : 30;
+
+    const restaurantResult = await pool.query(
+      'SELECT id, name, balance, currency_code FROM restaurants WHERE id = $1',
+      [restaurantId]
+    );
+    if (!restaurantResult.rows.length) {
+      return res.status(404).json({ error: 'Ресторан не найден' });
+    }
+
+    const transactionsResult = await pool.query(`
+      SELECT
+        bt.id,
+        bt.restaurant_id,
+        bt.user_id,
+        bt.amount,
+        bt.type,
+        bt.payment_category,
+        bt.description,
+        bt.created_at,
+        u.username AS actor_username,
+        COALESCE(NULLIF(BTRIM(u.full_name), ''), NULLIF(BTRIM(u.username), ''), 'Система') AS actor_name
+      FROM billing_transactions bt
+      LEFT JOIN users u ON u.id = bt.user_id
+      WHERE bt.restaurant_id = $1
+        AND bt.type IN ('deposit', 'refund', 'store_payment')
+      ORDER BY bt.created_at DESC, bt.id DESC
+      LIMIT $2
+    `, [restaurantId, limit]);
+
+    res.json({
+      restaurant: restaurantResult.rows[0],
+      transactions: transactionsResult.rows
+    });
+  } catch (error) {
+    console.error('Billing transactions fetch error:', error);
+    res.status(500).json({ error: 'Ошибка получения истории операций' });
+  }
+});
+
+// Общий журнал пополнений/возвратов по всем магазинам
+router.get('/billing/transactions', async (req, res) => {
+  try {
+    await ensureBillingTransactionsCategory();
+    const parsedPage = Number.parseInt(req.query.page, 10);
+    const parsedLimit = Number.parseInt(req.query.limit, 10);
+    const page = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+    const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 500) : 20;
+    const offset = (page - 1) * limit;
+
+    const parsedRestaurantId = Number.parseInt(req.query.restaurant_id, 10);
+    const restaurantId = Number.isFinite(parsedRestaurantId) && parsedRestaurantId > 0
+      ? parsedRestaurantId
+      : null;
+    const typeFilterRaw = String(req.query.type || '').trim().toLowerCase();
+    const typeFilter = ['deposit', 'refund', 'store_payment'].includes(typeFilterRaw) ? typeFilterRaw : null;
+    const search = String(req.query.search || '').trim();
+    const startDate = String(req.query.start_date || '').trim();
+    const endDate = String(req.query.end_date || '').trim();
+    const validDatePattern = /^\d{4}-\d{2}-\d{2}$/;
+
+    const whereParts = [`bt.type IN ('deposit', 'refund', 'store_payment')`];
+    const params = [];
+
+    if (restaurantId) {
+      params.push(restaurantId);
+      whereParts.push(`bt.restaurant_id = $${params.length}`);
+    }
+
+    if (typeFilter) {
+      params.push(typeFilter);
+      whereParts.push(`bt.type = $${params.length}`);
+    }
+
+    if (search) {
+      params.push(`%${search}%`);
+      whereParts.push(`(
+        bt.description ILIKE $${params.length}
+        OR r.name ILIKE $${params.length}
+        OR u.username ILIKE $${params.length}
+        OR COALESCE(u.full_name, '') ILIKE $${params.length}
+      )`);
+    }
+
+    if (validDatePattern.test(startDate)) {
+      params.push(startDate);
+      whereParts.push(`bt.created_at::date >= $${params.length}`);
+    }
+
+    if (validDatePattern.test(endDate)) {
+      params.push(endDate);
+      whereParts.push(`bt.created_at::date <= $${params.length}`);
+    }
+
+    const whereSql = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
+
+    const countQuery = `
+      SELECT COUNT(*)::int AS total
+      FROM billing_transactions bt
+      INNER JOIN restaurants r ON r.id = bt.restaurant_id
+      LEFT JOIN users u ON u.id = bt.user_id
+      ${whereSql}
+    `;
+    const totalResult = await pool.query(countQuery, params);
+    const total = Number(totalResult.rows?.[0]?.total || 0);
+
+    const listParams = [...params, limit, offset];
+    const rowsQuery = `
+      SELECT
+        bt.id,
+        bt.restaurant_id,
+        bt.user_id,
+        bt.amount,
+        bt.type,
+        bt.payment_category,
+        bt.description,
+        bt.created_at,
+        r.name AS restaurant_name,
+        r.currency_code AS restaurant_currency_code,
+        u.username AS actor_username,
+        COALESCE(NULLIF(BTRIM(u.full_name), ''), NULLIF(BTRIM(u.username), ''), 'Система') AS actor_name
+      FROM billing_transactions bt
+      INNER JOIN restaurants r ON r.id = bt.restaurant_id
+      LEFT JOIN users u ON u.id = bt.user_id
+      ${whereSql}
+      ORDER BY bt.created_at DESC, bt.id DESC
+      LIMIT $${listParams.length - 1}
+      OFFSET $${listParams.length}
+    `;
+    const rowsResult = await pool.query(rowsQuery, listParams);
+
+    res.json({
+      transactions: rowsResult.rows || [],
+      total,
+      page,
+      limit
+    });
+  } catch (error) {
+    console.error('Billing transactions list error:', error);
+    res.status(500).json({ error: 'Ошибка получения журнала операций' });
+  }
+});
+
+const ensureFoundersAccessByPassword = (req, res) => {
+  const providedPassword = String(req.get('x-founders-password') || req.query.password || req.body?.password || '').trim();
+  if (!providedPassword || providedPassword !== FOUNDERS_ACCESS_PASSWORD) {
+    res.status(403).json({ error: 'Неверный пароль доступа к вкладке учредителей' });
+    return false;
+  }
+  return true;
+};
+const buildOrganizationExpensesWhereSql = ({ startDate, endDate, tableAlias = 'oe', paramsStartIndex = 1 } = {}) => {
+  const whereParts = [];
+  const params = [];
+  let paramIndex = paramsStartIndex;
+
+  if (startDate) {
+    params.push(startDate);
+    whereParts.push(`${tableAlias}.expense_date >= $${paramIndex}`);
+    paramIndex += 1;
+  }
+  if (endDate) {
+    params.push(endDate);
+    whereParts.push(`${tableAlias}.expense_date <= $${paramIndex}`);
+    paramIndex += 1;
+  }
+
+  return {
+    whereSql: whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '',
+    params,
+    nextIndex: paramIndex
+  };
+};
+
+router.get('/founders/analytics', async (req, res) => {
+  try {
+    if (!ensureFoundersAccessByPassword(req, res)) return;
+    await ensureOrganizationExpensesSchema();
+    await ensureFounderProfilesSchema();
+
+    const startDate = parseDateRangeFilterValue(req.query.start_date);
+    const endDate = parseDateRangeFilterValue(req.query.end_date);
+    const modulePatterns = FOUNDERS_MODULE_DEFINITIONS.flatMap((moduleItem) => (
+      (moduleItem.patterns || []).map((pattern) => ({
+        module_key: moduleItem.key,
+        pattern
+      }))
+    ));
+    const params = modulePatterns.map((item) => item.pattern);
+    const patternOrConditions = modulePatterns.map((_, index) => `bt.description ILIKE $${index + 1}`);
+    const moduleCaseBranches = FOUNDERS_MODULE_DEFINITIONS.map((moduleItem) => {
+      const indexes = modulePatterns
+        .map((patternItem, index) => (patternItem.module_key === moduleItem.key ? index + 1 : null))
+        .filter(Boolean);
+      if (!indexes.length) return null;
+      const condition = indexes.map((idx) => `bt.description ILIKE $${idx}`).join(' OR ');
+      return `WHEN ${condition} THEN '${moduleItem.key}'`;
+    }).filter(Boolean);
+    const whereParts = [
+      `bt.type = 'withdrawal'`,
+      `bt.amount < 0`,
+      patternOrConditions.length ? `(${patternOrConditions.join(' OR ')})` : 'FALSE'
+    ];
+
+    if (startDate) {
+      params.push(startDate);
+      whereParts.push(`bt.created_at::date >= $${params.length}`);
+    }
+    if (endDate) {
+      params.push(endDate);
+      whereParts.push(`bt.created_at::date <= $${params.length}`);
+    }
+
+    const whereSql = whereParts.join(' AND ');
+    const moduleCaseSql = moduleCaseBranches.join('\n          ');
+    const moduleTotalsResult = await pool.query(
+      `
+      WITH classified AS (
+        SELECT
+          COALESCE(NULLIF(BTRIM(r.currency_code), ''), 'uz') AS currency_code,
+          CASE
+          ${moduleCaseSql}
+            ELSE NULL
+          END AS module_key,
+          ABS(bt.amount)::numeric AS amount
+        FROM billing_transactions bt
+        INNER JOIN restaurants r ON r.id = bt.restaurant_id
+        WHERE ${whereSql}
+      )
+      SELECT
+        currency_code,
+        module_key,
+        COUNT(*)::int AS transactions_count,
+        COALESCE(SUM(amount), 0)::numeric AS amount
+      FROM classified
+      WHERE module_key IS NOT NULL
+      GROUP BY currency_code, module_key
+      ORDER BY currency_code ASC, module_key ASC
+      `,
+      params
+    );
+    const monthlyModuleTotalsResult = await pool.query(
+      `
+      WITH classified AS (
+        SELECT
+          date_trunc('month', bt.created_at)::date AS month_start,
+          to_char(date_trunc('month', bt.created_at), 'YYYY-MM') AS month_key,
+          to_char(date_trunc('month', bt.created_at), 'MM.YYYY') AS month_label,
+          COALESCE(NULLIF(BTRIM(r.currency_code), ''), 'uz') AS currency_code,
+          CASE
+          ${moduleCaseSql}
+            ELSE NULL
+          END AS module_key,
+          ABS(bt.amount)::numeric AS amount
+        FROM billing_transactions bt
+        INNER JOIN restaurants r ON r.id = bt.restaurant_id
+        WHERE ${whereSql}
+      )
+      SELECT
+        month_start,
+        month_key,
+        month_label,
+        currency_code,
+        module_key,
+        COUNT(*)::int AS transactions_count,
+        COALESCE(SUM(amount), 0)::numeric AS amount
+      FROM classified
+      WHERE module_key IS NOT NULL
+      GROUP BY month_start, month_key, month_label, currency_code, module_key
+      ORDER BY month_start ASC, currency_code ASC, module_key ASC
+      `,
+      params
+    );
+    const expenseWhere = buildOrganizationExpensesWhereSql({ startDate, endDate, tableAlias: 'oe', paramsStartIndex: 1 });
+    const expenseTotalsResult = await pool.query(
+      `
+      SELECT
+        COALESCE(NULLIF(BTRIM(oe.currency_code), ''), 'uz') AS currency_code,
+        COUNT(*)::int AS records_count,
+        COALESCE(SUM(oe.amount), 0)::numeric AS amount
+      FROM organization_expenses oe
+      ${expenseWhere.whereSql}
+      GROUP BY COALESCE(NULLIF(BTRIM(oe.currency_code), ''), 'uz')
+      ORDER BY currency_code ASC
+      `,
+      expenseWhere.params
+    );
+    const expenseCategoryTotalsResult = await pool.query(
+      `
+      SELECT
+        COALESCE(NULLIF(BTRIM(oe.currency_code), ''), 'uz') AS currency_code,
+        oe.category_id,
+        c.code AS category_code,
+        c.name_ru,
+        c.name_uz,
+        COUNT(*)::int AS records_count,
+        COALESCE(SUM(oe.amount), 0)::numeric AS amount
+      FROM organization_expenses oe
+      INNER JOIN organization_expense_categories c ON c.id = oe.category_id
+      ${expenseWhere.whereSql}
+      GROUP BY COALESCE(NULLIF(BTRIM(oe.currency_code), ''), 'uz'), oe.category_id, c.code, c.name_ru, c.name_uz
+      ORDER BY LOWER(c.name_ru) ASC, currency_code ASC
+      `,
+      expenseWhere.params
+    );
+    const monthlyExpenseTotalsResult = await pool.query(
+      `
+      SELECT
+        date_trunc('month', oe.expense_date)::date AS month_start,
+        to_char(date_trunc('month', oe.expense_date), 'YYYY-MM') AS month_key,
+        to_char(date_trunc('month', oe.expense_date), 'MM.YYYY') AS month_label,
+        COALESCE(NULLIF(BTRIM(oe.currency_code), ''), 'uz') AS currency_code,
+        COUNT(*)::int AS records_count,
+        COALESCE(SUM(oe.amount), 0)::numeric AS amount
+      FROM organization_expenses oe
+      ${expenseWhere.whereSql}
+      GROUP BY month_start, month_key, month_label, COALESCE(NULLIF(BTRIM(oe.currency_code), ''), 'uz')
+      ORDER BY month_start ASC, currency_code ASC
+      `,
+      expenseWhere.params
+    );
+
+    const rawModuleTotals = (moduleTotalsResult.rows || []).map((row) => ({
+      currency_code: String(row.currency_code || 'uz').toLowerCase(),
+      module_key: String(row.module_key || '').trim().toLowerCase(),
+      transactions_count: Number.parseInt(row.transactions_count, 10) || 0,
+      amount: roundMoneyValue(row.amount)
+    }));
+    const rawMonthlyModuleTotals = (monthlyModuleTotalsResult.rows || []).map((row) => ({
+      month_start: row.month_start || null,
+      month_key: String(row.month_key || '').trim(),
+      month_label: String(row.month_label || '').trim(),
+      currency_code: String(row.currency_code || 'uz').toLowerCase(),
+      module_key: String(row.module_key || '').trim().toLowerCase(),
+      transactions_count: Number.parseInt(row.transactions_count, 10) || 0,
+      amount: roundMoneyValue(row.amount)
+    }));
+    const rawExpenseTotals = (expenseTotalsResult.rows || []).map((row) => ({
+      currency_code: normalizeExpenseCurrencyCode(row.currency_code, 'uz'),
+      records_count: Number.parseInt(row.records_count, 10) || 0,
+      amount: roundMoneyValue(row.amount)
+    }));
+    const rawExpenseCategoryTotals = (expenseCategoryTotalsResult.rows || []).map((row) => ({
+      currency_code: normalizeExpenseCurrencyCode(row.currency_code, 'uz'),
+      category_id: Number.parseInt(row.category_id, 10) || 0,
+      category_code: String(row.category_code || '').trim().toLowerCase(),
+      category_name_ru: String(row.name_ru || '').trim(),
+      category_name_uz: String(row.name_uz || '').trim(),
+      records_count: Number.parseInt(row.records_count, 10) || 0,
+      amount: roundMoneyValue(row.amount)
+    }));
+    const rawMonthlyExpenseTotals = (monthlyExpenseTotalsResult.rows || []).map((row) => ({
+      month_start: row.month_start || null,
+      month_key: String(row.month_key || '').trim(),
+      month_label: String(row.month_label || '').trim(),
+      currency_code: normalizeExpenseCurrencyCode(row.currency_code, 'uz'),
+      records_count: Number.parseInt(row.records_count, 10) || 0,
+      amount: roundMoneyValue(row.amount)
+    }));
+    const founderProfilesResult = await pool.query(`
+      SELECT founder_key, photo_url
+      FROM founder_profiles
+    `);
+    const founderPhotoMap = new Map(
+      (founderProfilesResult.rows || []).map((row) => ([
+        normalizeFounderKey(row.founder_key),
+        normalizeFounderPhotoUrl(row.photo_url)
+      ]))
+    );
+
+    const currencySet = new Set();
+    for (const row of rawModuleTotals) currencySet.add(row.currency_code);
+    for (const row of rawMonthlyModuleTotals) currencySet.add(row.currency_code);
+    for (const row of rawExpenseTotals) currencySet.add(row.currency_code);
+    for (const row of rawExpenseCategoryTotals) currencySet.add(row.currency_code);
+    for (const row of rawMonthlyExpenseTotals) currencySet.add(row.currency_code);
+    const availableCurrencies = Array.from(currencySet).sort((left, right) => left.localeCompare(right, 'ru'));
+
+    const moduleRowMap = new Map(
+      rawModuleTotals.map((row) => [`${row.currency_code}__${row.module_key}`, row])
+    );
+    const expenseByCurrencyMap = new Map(
+      rawExpenseTotals.map((row) => [row.currency_code, row])
+    );
+    const moduleTotals = [];
+    for (const currencyCode of availableCurrencies) {
+      for (const moduleItem of FOUNDERS_MODULE_DEFINITIONS) {
+        const row = moduleRowMap.get(`${currencyCode}__${moduleItem.key}`);
+        moduleTotals.push({
+          module_key: moduleItem.key,
+          module_label: moduleItem.label,
+          currency_code: currencyCode,
+          transactions_count: row?.transactions_count || 0,
+          amount: roundMoneyValue(row?.amount || 0)
+        });
+      }
+    }
+
+    const totalsByCurrency = availableCurrencies.map((currencyCode) => {
+      const rows = moduleTotals.filter((item) => item.currency_code === currencyCode);
+      const getRow = (moduleKey) => rows.find((item) => item.module_key === moduleKey) || null;
+      const ordersRow = getRow('orders');
+      const reservationsRow = getRow('reservations');
+      const deliveryRow = getRow('delivery');
+      const adsRow = getRow('ads');
+      const superappRow = getRow('superapp');
+      const incomeTransactionsCount = rows.reduce((acc, item) => acc + Number(item.transactions_count || 0), 0);
+      const incomeTotal = roundMoneyValue(rows.reduce((acc, item) => acc + Number(item.amount || 0), 0));
+      const expenseRow = expenseByCurrencyMap.get(currencyCode);
+      const expenseTotal = roundMoneyValue(expenseRow?.amount || 0);
+      const expenseRecordsCount = Number(expenseRow?.records_count || 0);
+      const balanceTotal = roundMoneyValue(incomeTotal - expenseTotal);
+      return {
+        currency_code: currencyCode,
+        orders_count: Number(ordersRow?.transactions_count || 0),
+        orders_total: roundMoneyValue(ordersRow?.amount || 0),
+        reservations_count: Number(reservationsRow?.transactions_count || 0),
+        reservations_total: roundMoneyValue(reservationsRow?.amount || 0),
+        delivery_count: Number(deliveryRow?.transactions_count || 0),
+        delivery_total: roundMoneyValue(deliveryRow?.amount || 0),
+        ads_count: Number(adsRow?.transactions_count || 0),
+        ads_total: roundMoneyValue(adsRow?.amount || 0),
+        superapp_count: Number(superappRow?.transactions_count || 0),
+        superapp_total: roundMoneyValue(superappRow?.amount || 0),
+        income_transactions_count: incomeTransactionsCount,
+        income_total: incomeTotal,
+        expense_records_count: expenseRecordsCount,
+        expense_total: expenseTotal,
+        balance_total: balanceTotal,
+        transactions_count: incomeTransactionsCount,
+        total_distributable: balanceTotal
+      };
+    });
+
+    const founderModuleTotals = [];
+    const founderTotalsMap = new Map();
+    const founderOrderMap = new Map(FOUNDER_SHARE_CONFIG.map((item, index) => [item.key, index]));
+    for (const founder of FOUNDER_SHARE_CONFIG) {
+      for (const currencyCode of availableCurrencies) {
+        const founderTotalKey = `${founder.key}__${currencyCode}`;
+        if (!founderTotalsMap.has(founderTotalKey)) {
+          const baseEntry = {
+            founder_key: founder.key,
+            founder_name: founder.name,
+            currency_code: currencyCode,
+            order_percent: Number(founder.order_percent || 0),
+            reservation_percent: Number(founder.reservation_percent || 0),
+            gross_amount: 0,
+            expense_amount: 0,
+            total_amount: 0
+          };
+          for (const moduleItem of FOUNDERS_MODULE_DEFINITIONS) {
+            baseEntry[`${moduleItem.key}_amount`] = 0;
+          }
+          founderTotalsMap.set(founderTotalKey, baseEntry);
+        }
+
+        for (const moduleItem of FOUNDERS_MODULE_DEFINITIONS) {
+          const moduleRow = moduleTotals.find((item) => (
+            item.currency_code === currencyCode && item.module_key === moduleItem.key
+          )) || {
+            amount: 0,
+            transactions_count: 0
+          };
+          const founderPercent = getFounderModuleSharePercent(founder.key, moduleItem.key);
+          const founderAmount = roundMoneyValue((Number(moduleRow.amount || 0) * founderPercent) / 100);
+          founderModuleTotals.push({
+            founder_key: founder.key,
+            founder_name: founder.name,
+            module_key: moduleItem.key,
+            module_label: moduleItem.label,
+            currency_code: currencyCode,
+            transactions_count: Number(moduleRow.transactions_count || 0),
+            module_total_amount: roundMoneyValue(moduleRow.amount || 0),
+            founder_percent: founderPercent,
+            founder_amount: founderAmount
+          });
+
+          const founderTotalEntry = founderTotalsMap.get(founderTotalKey);
+          founderTotalEntry[`${moduleItem.key}_amount`] = roundMoneyValue(
+            Number(founderTotalEntry[`${moduleItem.key}_amount`] || 0) + founderAmount
+          );
+          founderTotalEntry.gross_amount = roundMoneyValue(
+            Number(founderTotalEntry.gross_amount || 0) + founderAmount
+          );
+          founderTotalEntry.total_amount = founderTotalEntry.gross_amount;
+        }
+      }
+    }
+
+    const founderExpenseTotals = [];
+    for (const currencyCode of availableCurrencies) {
+      const expenseTotal = roundMoneyValue(expenseByCurrencyMap.get(currencyCode)?.amount || 0);
+      const totalGrossForCurrency = FOUNDER_SHARE_CONFIG.reduce((acc, founder) => {
+        const entry = founderTotalsMap.get(`${founder.key}__${currencyCode}`);
+        return acc + Number(entry?.gross_amount || 0);
+      }, 0);
+      const expenseAllocationMap = distributeAmountByWeights(
+        expenseTotal,
+        FOUNDER_SHARE_CONFIG.map((founder) => {
+          const entry = founderTotalsMap.get(`${founder.key}__${currencyCode}`);
+          return {
+            key: founder.key,
+            weight: totalGrossForCurrency > 0
+              ? Number(entry?.gross_amount || 0)
+              : Number(founder.order_percent || 0)
+          };
+        })
+      );
+
+      for (const founder of FOUNDER_SHARE_CONFIG) {
+        const entry = founderTotalsMap.get(`${founder.key}__${currencyCode}`);
+        if (!entry) continue;
+        const founderExpenseAmount = roundMoneyValue(expenseAllocationMap.get(founder.key) || 0);
+        entry.expense_amount = founderExpenseAmount;
+        entry.total_amount = roundMoneyValue(Number(entry.gross_amount || 0) - founderExpenseAmount);
+        founderExpenseTotals.push({
+          founder_key: founder.key,
+          founder_name: founder.name,
+          currency_code: currencyCode,
+          expense_amount: founderExpenseAmount
+        });
+      }
+    }
+
+    const founderTotals = Array.from(founderTotalsMap.values()).sort((left, right) => {
+      const leftOrder = founderOrderMap.has(left.founder_key) ? founderOrderMap.get(left.founder_key) : Number.MAX_SAFE_INTEGER;
+      const rightOrder = founderOrderMap.has(right.founder_key) ? founderOrderMap.get(right.founder_key) : Number.MAX_SAFE_INTEGER;
+      if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+      return String(left.currency_code || '').localeCompare(String(right.currency_code || ''), 'ru');
+    });
+
+    const founderMonthlyTotalsMap = new Map();
+    const founderMonthlyModuleTotals = [];
+    for (const monthRow of rawMonthlyModuleTotals) {
+      const moduleLabel = FOUNDERS_MODULE_LABEL_MAP[monthRow.module_key] || monthRow.module_key || '—';
+      for (const founder of FOUNDER_SHARE_CONFIG) {
+        const founderPercent = getFounderModuleSharePercent(founder.key, monthRow.module_key);
+        const founderAmount = roundMoneyValue((Number(monthRow.amount || 0) * founderPercent) / 100);
+        founderMonthlyModuleTotals.push({
+          founder_key: founder.key,
+          founder_name: founder.name,
+          month_key: monthRow.month_key,
+          month_label: monthRow.month_label,
+          month_start: monthRow.month_start,
+          currency_code: monthRow.currency_code,
+          module_key: monthRow.module_key,
+          module_label: moduleLabel,
+          founder_percent: founderPercent,
+          founder_amount: founderAmount
+        });
+
+        const monthlyKey = [
+          founder.key,
+          monthRow.month_key,
+          monthRow.currency_code
+        ].join('__');
+        if (!founderMonthlyTotalsMap.has(monthlyKey)) {
+          founderMonthlyTotalsMap.set(monthlyKey, {
+            founder_key: founder.key,
+            founder_name: founder.name,
+            month_key: monthRow.month_key,
+            month_label: monthRow.month_label,
+            month_start: monthRow.month_start,
+            currency_code: monthRow.currency_code,
+            gross_amount: 0,
+            expense_amount: 0,
+            total_amount: 0
+          });
+        }
+        const entry = founderMonthlyTotalsMap.get(monthlyKey);
+        entry.gross_amount = roundMoneyValue(Number(entry.gross_amount || 0) + founderAmount);
+        entry.total_amount = entry.gross_amount;
+      }
+    }
+
+    const monthlyMetaMap = new Map();
+    for (const monthRow of rawMonthlyModuleTotals) {
+      monthlyMetaMap.set(`${monthRow.month_key}__${monthRow.currency_code}`, {
+        month_key: monthRow.month_key,
+        month_label: monthRow.month_label,
+        month_start: monthRow.month_start,
+        currency_code: monthRow.currency_code
+      });
+    }
+    for (const monthRow of rawMonthlyExpenseTotals) {
+      monthlyMetaMap.set(`${monthRow.month_key}__${monthRow.currency_code}`, {
+        month_key: monthRow.month_key,
+        month_label: monthRow.month_label,
+        month_start: monthRow.month_start,
+        currency_code: monthRow.currency_code
+      });
+    }
+
+    for (const expenseMonthRow of rawMonthlyExpenseTotals) {
+      const monthMetaKey = `${expenseMonthRow.month_key}__${expenseMonthRow.currency_code}`;
+      const monthMeta = monthlyMetaMap.get(monthMetaKey);
+      if (!monthMeta) continue;
+
+      for (const founder of FOUNDER_SHARE_CONFIG) {
+        const founderMonthlyKey = `${founder.key}__${monthMeta.month_key}__${monthMeta.currency_code}`;
+        if (!founderMonthlyTotalsMap.has(founderMonthlyKey)) {
+          founderMonthlyTotalsMap.set(founderMonthlyKey, {
+            founder_key: founder.key,
+            founder_name: founder.name,
+            month_key: monthMeta.month_key,
+            month_label: monthMeta.month_label,
+            month_start: monthMeta.month_start,
+            currency_code: monthMeta.currency_code,
+            gross_amount: 0,
+            expense_amount: 0,
+            total_amount: 0
+          });
+        }
+      }
+
+      const expenseAmount = roundMoneyValue(expenseMonthRow.amount || 0);
+      if (expenseAmount <= 0) continue;
+      const monthTotalGross = FOUNDER_SHARE_CONFIG.reduce((acc, founder) => {
+        const entry = founderMonthlyTotalsMap.get(`${founder.key}__${monthMeta.month_key}__${monthMeta.currency_code}`);
+        return acc + Number(entry?.gross_amount || 0);
+      }, 0);
+      const allocationMap = distributeAmountByWeights(
+        expenseAmount,
+        FOUNDER_SHARE_CONFIG.map((founder) => {
+          const entry = founderMonthlyTotalsMap.get(`${founder.key}__${monthMeta.month_key}__${monthMeta.currency_code}`);
+          return {
+            key: founder.key,
+            weight: monthTotalGross > 0
+              ? Number(entry?.gross_amount || 0)
+              : Number(founder.order_percent || 0)
+          };
+        })
+      );
+
+      for (const founder of FOUNDER_SHARE_CONFIG) {
+        const founderMonthlyKey = `${founder.key}__${monthMeta.month_key}__${monthMeta.currency_code}`;
+        const entry = founderMonthlyTotalsMap.get(founderMonthlyKey);
+        if (!entry) continue;
+        entry.expense_amount = roundMoneyValue(Number(entry.expense_amount || 0) + Number(allocationMap.get(founder.key) || 0));
+        entry.total_amount = roundMoneyValue(Number(entry.gross_amount || 0) - Number(entry.expense_amount || 0));
+      }
+    }
+
+    const founderMonthlyTotals = Array.from(founderMonthlyTotalsMap.values()).sort((left, right) => {
+      if (String(left.month_key || '') !== String(right.month_key || '')) {
+        return String(left.month_key || '').localeCompare(String(right.month_key || ''), 'ru');
+      }
+      const leftOrder = founderOrderMap.has(left.founder_key) ? founderOrderMap.get(left.founder_key) : Number.MAX_SAFE_INTEGER;
+      const rightOrder = founderOrderMap.has(right.founder_key) ? founderOrderMap.get(right.founder_key) : Number.MAX_SAFE_INTEGER;
+      if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+      return String(left.currency_code || '').localeCompare(String(right.currency_code || ''), 'ru');
+    });
+
+    res.json({
+      period: {
+        start_date: startDate,
+        end_date: endDate
+      },
+      modules_config: FOUNDERS_MODULE_DEFINITIONS.map((item) => ({ key: item.key, label: item.label })),
+      available_currencies: availableCurrencies,
+      shares_config: FOUNDER_SHARE_CONFIG.map((item) => ({
+        ...item,
+        photo_url: founderPhotoMap.get(normalizeFounderKey(item.key)) || null
+      })),
+      totals_by_currency: totalsByCurrency,
+      expense_totals_by_currency: rawExpenseTotals,
+      expense_category_totals: rawExpenseCategoryTotals,
+      expense_monthly_totals: rawMonthlyExpenseTotals,
+      module_totals: moduleTotals,
+      module_monthly_totals: rawMonthlyModuleTotals.map((item) => ({
+        ...item,
+        module_label: FOUNDERS_MODULE_LABEL_MAP[item.module_key] || item.module_key || '—'
+      })),
+      founder_module_totals: founderModuleTotals,
+      founder_expense_totals: founderExpenseTotals,
+      founder_totals: founderTotals,
+      founder_monthly_totals: founderMonthlyTotals,
+      founder_monthly_module_totals: founderMonthlyModuleTotals,
+      generated_at: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Get founders analytics error:', error);
+    res.status(500).json({ error: 'Ошибка загрузки аналитики учредителей' });
+  }
+});
+
+router.get('/founders/expense-categories', async (req, res) => {
+  try {
+    if (!ensureFoundersAccessByPassword(req, res)) return;
+    await ensureOrganizationExpensesSchema();
+
+    const result = await pool.query(`
+      SELECT
+        c.id,
+        c.code,
+        c.name_ru,
+        c.name_uz,
+        c.is_system,
+        c.is_active,
+        c.created_at,
+        c.updated_at,
+        COUNT(e.id)::int AS expenses_count,
+        COALESCE(SUM(e.amount), 0)::numeric AS total_amount
+      FROM organization_expense_categories c
+      LEFT JOIN organization_expenses e ON e.category_id = c.id
+      GROUP BY c.id
+      ORDER BY c.is_system DESC, LOWER(c.name_ru) ASC, c.id ASC
+    `);
+
+    res.json({
+      items: (result.rows || []).map((row) => ({
+        id: Number.parseInt(row.id, 10) || 0,
+        code: String(row.code || '').trim().toLowerCase() || null,
+        name_ru: String(row.name_ru || '').trim(),
+        name_uz: String(row.name_uz || '').trim(),
+        is_system: row.is_system === true,
+        is_active: row.is_active !== false,
+        expenses_count: Number.parseInt(row.expenses_count, 10) || 0,
+        total_amount: roundMoneyValue(row.total_amount),
+        created_at: row.created_at || null,
+        updated_at: row.updated_at || null
+      }))
+    });
+  } catch (error) {
+    console.error('Get founders expense categories error:', error);
+    res.status(500).json({ error: 'Ошибка загрузки статей расходов' });
+  }
+});
+
+router.put('/founders/profiles/:founderKey', async (req, res) => {
+  try {
+    if (!ensureFoundersAccessByPassword(req, res)) return;
+    await ensureFounderProfilesSchema();
+
+    const founderKey = normalizeFounderKey(req.params.founderKey);
+    if (!founderKey || !FOUNDER_CONFIG_BY_KEY[founderKey]) {
+      return res.status(404).json({ error: 'Учредитель не найден' });
+    }
+
+    const photoUrl = normalizeFounderPhotoUrl(req.body?.photo_url);
+    await pool.query(
+      `
+      INSERT INTO founder_profiles (founder_key, photo_url, updated_by, updated_at)
+      VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+      ON CONFLICT (founder_key)
+      DO UPDATE SET
+        photo_url = EXCLUDED.photo_url,
+        updated_by = EXCLUDED.updated_by,
+        updated_at = CURRENT_TIMESTAMP
+      `,
+      [founderKey, photoUrl, req.user?.id || null]
+    );
+
+    res.json({
+      founder_key: founderKey,
+      photo_url: photoUrl
+    });
+  } catch (error) {
+    console.error('Update founder profile error:', error);
+    res.status(500).json({ error: 'Ошибка сохранения фото учредителя' });
+  }
+});
+
+router.post('/founders/expense-categories', async (req, res) => {
+  try {
+    if (!ensureFoundersAccessByPassword(req, res)) return;
+    await ensureOrganizationExpensesSchema();
+
+    const inputNameRu = normalizeExpenseCategoryName(req.body?.name_ru);
+    const inputNameUz = normalizeExpenseCategoryName(req.body?.name_uz);
+    const nameRu = inputNameRu || inputNameUz;
+    const nameUz = inputNameUz || inputNameRu;
+
+    if (!nameRu) {
+      return res.status(400).json({ error: 'Укажите название статьи расходов (RU или UZ)' });
+    }
+
+    const duplicateResult = await pool.query(
+      `
+      SELECT id
+      FROM organization_expense_categories
+      WHERE LOWER(name_ru) = LOWER($1)
+         OR LOWER(COALESCE(name_uz, '')) = LOWER($2)
+      LIMIT 1
+      `,
+      [nameRu, nameUz || '']
+    );
+    if (duplicateResult.rows.length > 0) {
+      return res.status(409).json({ error: 'Статья с таким названием уже существует' });
+    }
+
+    const createdResult = await pool.query(
+      `
+      INSERT INTO organization_expense_categories (
+        code,
+        name_ru,
+        name_uz,
+        is_system,
+        is_active,
+        created_by,
+        updated_by
+      )
+      VALUES (NULL, $1, $2, false, true, $3, $3)
+      RETURNING id, code, name_ru, name_uz, is_system, is_active, created_at, updated_at
+      `,
+      [nameRu, nameUz || null, req.user.id]
+    );
+
+    res.json(createdResult.rows[0]);
+  } catch (error) {
+    console.error('Create founders expense category error:', error);
+    res.status(500).json({ error: 'Ошибка создания статьи расходов' });
+  }
+});
+
+router.put('/founders/expense-categories/:id', async (req, res) => {
+  try {
+    if (!ensureFoundersAccessByPassword(req, res)) return;
+    await ensureOrganizationExpensesSchema();
+
+    const categoryId = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(categoryId) || categoryId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID статьи расходов' });
+    }
+
+    const currentResult = await pool.query(
+      `
+      SELECT id, name_ru, name_uz, is_active
+      FROM organization_expense_categories
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [categoryId]
+    );
+    if (currentResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Статья расходов не найдена' });
+    }
+
+    const current = currentResult.rows[0];
+    const inputNameRu = normalizeExpenseCategoryName(req.body?.name_ru);
+    const inputNameUz = normalizeExpenseCategoryName(req.body?.name_uz);
+    const nextNameRu = inputNameRu || inputNameUz || normalizeExpenseCategoryName(current.name_ru);
+    const nextNameUz = inputNameUz || inputNameRu || normalizeExpenseCategoryName(current.name_uz);
+    const nextIsActive = req.body?.is_active === undefined
+      ? current.is_active !== false
+      : normalizeBooleanFlag(req.body?.is_active, current.is_active !== false);
+
+    if (!nextNameRu) {
+      return res.status(400).json({ error: 'Укажите название статьи расходов (RU или UZ)' });
+    }
+
+    const duplicateResult = await pool.query(
+      `
+      SELECT id
+      FROM organization_expense_categories
+      WHERE id <> $1
+        AND (
+          LOWER(name_ru) = LOWER($2)
+          OR LOWER(COALESCE(name_uz, '')) = LOWER($3)
+        )
+      LIMIT 1
+      `,
+      [categoryId, nextNameRu, nextNameUz || '']
+    );
+    if (duplicateResult.rows.length > 0) {
+      return res.status(409).json({ error: 'Статья с таким названием уже существует' });
+    }
+
+    const updatedResult = await pool.query(
+      `
+      UPDATE organization_expense_categories
+      SET
+        name_ru = $1,
+        name_uz = $2,
+        is_active = $3,
+        updated_by = $4,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $5
+      RETURNING id, code, name_ru, name_uz, is_system, is_active, created_at, updated_at
+      `,
+      [nextNameRu, nextNameUz || null, nextIsActive, req.user.id, categoryId]
+    );
+
+    res.json(updatedResult.rows[0]);
+  } catch (error) {
+    console.error('Update founders expense category error:', error);
+    res.status(500).json({ error: 'Ошибка обновления статьи расходов' });
+  }
+});
+
+router.delete('/founders/expense-categories/:id', async (req, res) => {
+  try {
+    if (!ensureFoundersAccessByPassword(req, res)) return;
+    await ensureOrganizationExpensesSchema();
+
+    const categoryId = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(categoryId) || categoryId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID статьи расходов' });
+    }
+
+    const categoryResult = await pool.query(
+      `
+      SELECT
+        c.id,
+        c.is_system,
+        COUNT(e.id)::int AS expenses_count
+      FROM organization_expense_categories c
+      LEFT JOIN organization_expenses e ON e.category_id = c.id
+      WHERE c.id = $1
+      GROUP BY c.id
+      LIMIT 1
+      `,
+      [categoryId]
+    );
+    if (categoryResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Статья расходов не найдена' });
+    }
+
+    const item = categoryResult.rows[0];
+    const expensesCount = Number.parseInt(item.expenses_count, 10) || 0;
+    if (expensesCount > 0) {
+      return res.status(400).json({ error: 'Нельзя удалить статью: по ней уже есть записи расходов' });
+    }
+    if (item.is_system === true) {
+      return res.status(400).json({ error: 'Системную статью расходов удалять нельзя' });
+    }
+
+    await pool.query('DELETE FROM organization_expense_categories WHERE id = $1', [categoryId]);
+    res.json({ success: true, id: categoryId });
+  } catch (error) {
+    console.error('Delete founders expense category error:', error);
+    res.status(500).json({ error: 'Ошибка удаления статьи расходов' });
+  }
+});
+
+router.get('/founders/expenses', async (req, res) => {
+  try {
+    if (!ensureFoundersAccessByPassword(req, res)) return;
+    await ensureOrganizationExpensesSchema();
+
+    const startDate = parseDateRangeFilterValue(req.query.start_date);
+    const endDate = parseDateRangeFilterValue(req.query.end_date);
+    const parsedPage = Number.parseInt(req.query.page, 10);
+    const parsedLimit = Number.parseInt(req.query.limit, 10);
+    const page = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+    const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 1000) : 200;
+    const offset = (page - 1) * limit;
+    const categoryId = Number.parseInt(req.query.category_id, 10);
+    const normalizedCategoryId = Number.isFinite(categoryId) && categoryId > 0 ? categoryId : null;
+    const currencyRaw = String(req.query.currency_code || '').trim().toLowerCase();
+    const currencyCode = /^[a-z]{2,8}$/.test(currencyRaw) ? currencyRaw : '';
+    const search = String(req.query.search || '').trim();
+
+    const whereParts = [];
+    const params = [];
+    if (startDate) {
+      params.push(startDate);
+      whereParts.push(`oe.expense_date >= $${params.length}`);
+    }
+    if (endDate) {
+      params.push(endDate);
+      whereParts.push(`oe.expense_date <= $${params.length}`);
+    }
+    if (normalizedCategoryId) {
+      params.push(normalizedCategoryId);
+      whereParts.push(`oe.category_id = $${params.length}`);
+    }
+    if (currencyCode) {
+      params.push(currencyCode);
+      whereParts.push(`LOWER(COALESCE(NULLIF(BTRIM(oe.currency_code), ''), 'uz')) = $${params.length}`);
+    }
+    if (search) {
+      params.push(`%${search}%`);
+      whereParts.push(`(
+        oe.description ILIKE $${params.length}
+        OR c.name_ru ILIKE $${params.length}
+        OR COALESCE(c.name_uz, '') ILIKE $${params.length}
+      )`);
+    }
+    const whereSql = whereParts.length ? `WHERE ${whereParts.join(' AND ')}` : '';
+
+    const totalResult = await pool.query(
+      `
+      SELECT COUNT(*)::int AS total
+      FROM organization_expenses oe
+      INNER JOIN organization_expense_categories c ON c.id = oe.category_id
+      ${whereSql}
+      `,
+      params
+    );
+    const listResult = await pool.query(
+      `
+      SELECT
+        oe.id,
+        oe.category_id,
+        COALESCE(NULLIF(BTRIM(oe.currency_code), ''), 'uz') AS currency_code,
+        oe.amount,
+        oe.expense_date,
+        oe.description,
+        oe.created_at,
+        oe.updated_at,
+        c.code AS category_code,
+        c.name_ru AS category_name_ru,
+        c.name_uz AS category_name_uz,
+        COALESCE(NULLIF(BTRIM(u.full_name), ''), NULLIF(BTRIM(u.username), ''), 'Система') AS actor_name,
+        NULLIF(BTRIM(u.username), '') AS actor_username,
+        NULLIF(BTRIM(u.phone), '') AS actor_phone
+      FROM organization_expenses oe
+      INNER JOIN organization_expense_categories c ON c.id = oe.category_id
+      LEFT JOIN users u ON u.id = oe.created_by
+      ${whereSql}
+      ORDER BY oe.expense_date DESC, oe.id DESC
+      LIMIT $${params.length + 1}
+      OFFSET $${params.length + 2}
+      `,
+      [...params, limit, offset]
+    );
+    const totalsByCurrencyResult = await pool.query(
+      `
+      SELECT
+        COALESCE(NULLIF(BTRIM(oe.currency_code), ''), 'uz') AS currency_code,
+        COUNT(*)::int AS records_count,
+        COALESCE(SUM(oe.amount), 0)::numeric AS total_amount
+      FROM organization_expenses oe
+      INNER JOIN organization_expense_categories c ON c.id = oe.category_id
+      ${whereSql}
+      GROUP BY COALESCE(NULLIF(BTRIM(oe.currency_code), ''), 'uz')
+      ORDER BY currency_code ASC
+      `,
+      params
+    );
+
+    res.json({
+      items: (listResult.rows || []).map((row) => ({
+        id: Number.parseInt(row.id, 10) || 0,
+        category_id: Number.parseInt(row.category_id, 10) || 0,
+        currency_code: normalizeExpenseCurrencyCode(row.currency_code, 'uz'),
+        amount: roundMoneyValue(row.amount),
+        expense_date: row.expense_date || null,
+        description: row.description || null,
+        category_code: String(row.category_code || '').trim().toLowerCase() || null,
+        category_name_ru: String(row.category_name_ru || '').trim(),
+        category_name_uz: String(row.category_name_uz || '').trim(),
+        actor_name: String(row.actor_name || '').trim() || 'Система',
+        actor_username: String(row.actor_username || '').trim(),
+        actor_phone: String(row.actor_phone || '').trim(),
+        created_at: row.created_at || null,
+        updated_at: row.updated_at || null
+      })),
+      totals_by_currency: (totalsByCurrencyResult.rows || []).map((row) => ({
+        currency_code: normalizeExpenseCurrencyCode(row.currency_code, 'uz'),
+        records_count: Number.parseInt(row.records_count, 10) || 0,
+        amount: roundMoneyValue(row.total_amount)
+      })),
+      total: Number(totalResult.rows?.[0]?.total || 0),
+      page,
+      limit
+    });
+  } catch (error) {
+    console.error('Get organization expenses error:', error);
+    res.status(500).json({ error: 'Ошибка загрузки расходов организации' });
+  }
+});
+
+router.post('/founders/expenses', async (req, res) => {
+  try {
+    if (!ensureFoundersAccessByPassword(req, res)) return;
+    await ensureOrganizationExpensesSchema();
+
+    const categoryId = Number.parseInt(req.body?.category_id, 10);
+    const amount = roundMoneyValue(parseFlexibleAmount(req.body?.amount, 0));
+    const currencyCode = normalizeExpenseCurrencyCode(req.body?.currency_code, 'uz');
+    const expenseDate = parseDateRangeFilterValue(req.body?.expense_date) || new Date().toISOString().slice(0, 10);
+    const description = normalizeExpenseDescription(req.body?.description);
+
+    if (!Number.isFinite(categoryId) || categoryId <= 0) {
+      return res.status(400).json({ error: 'Укажите статью расходов' });
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: 'Укажите корректную сумму расхода' });
+    }
+
+    const categoryResult = await pool.query(
+      `
+      SELECT id, code, name_ru, name_uz
+      FROM organization_expense_categories
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [categoryId]
+    );
+    if (categoryResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Статья расходов не найдена' });
+    }
+    const category = categoryResult.rows[0];
+
+    const createdResult = await pool.query(
+      `
+      INSERT INTO organization_expenses (
+        category_id,
+        amount,
+        currency_code,
+        expense_date,
+        description,
+        created_by,
+        updated_by
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $6)
+      RETURNING id, category_id, amount, currency_code, expense_date, description, created_at, updated_at
+      `,
+      [categoryId, amount, currencyCode, expenseDate, description, req.user.id]
+    );
+
+    res.json({
+      ...createdResult.rows[0],
+      amount: roundMoneyValue(createdResult.rows[0]?.amount),
+      currency_code: normalizeExpenseCurrencyCode(createdResult.rows[0]?.currency_code, currencyCode),
+      category_code: String(category.code || '').trim().toLowerCase() || null,
+      category_name_ru: String(category.name_ru || '').trim(),
+      category_name_uz: String(category.name_uz || '').trim()
+    });
+  } catch (error) {
+    console.error('Create organization expense error:', error);
+    res.status(500).json({ error: 'Ошибка создания расхода' });
+  }
+});
+
+router.put('/founders/expenses/:id', async (req, res) => {
+  try {
+    if (!ensureFoundersAccessByPassword(req, res)) return;
+    await ensureOrganizationExpensesSchema();
+
+    const expenseId = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(expenseId) || expenseId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID расхода' });
+    }
+
+    const currentResult = await pool.query(
+      `
+      SELECT id, category_id, amount, currency_code, expense_date, description
+      FROM organization_expenses
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [expenseId]
+    );
+    if (currentResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Расход не найден' });
+    }
+
+    const current = currentResult.rows[0];
+    const parsedCategoryId = Number.parseInt(req.body?.category_id, 10);
+    const categoryId = Number.isFinite(parsedCategoryId) && parsedCategoryId > 0
+      ? parsedCategoryId
+      : Number.parseInt(current.category_id, 10);
+    const amount = req.body?.amount === undefined
+      ? roundMoneyValue(current.amount)
+      : roundMoneyValue(parseFlexibleAmount(req.body?.amount, 0));
+    const currencyCode = req.body?.currency_code === undefined
+      ? normalizeExpenseCurrencyCode(current.currency_code, 'uz')
+      : normalizeExpenseCurrencyCode(req.body?.currency_code, 'uz');
+    const expenseDate = req.body?.expense_date === undefined
+      ? (parseDateRangeFilterValue(current.expense_date) || new Date().toISOString().slice(0, 10))
+      : parseDateRangeFilterValue(req.body?.expense_date);
+    const description = req.body?.description === undefined
+      ? normalizeExpenseDescription(current.description)
+      : normalizeExpenseDescription(req.body?.description);
+
+    if (!Number.isFinite(categoryId) || categoryId <= 0) {
+      return res.status(400).json({ error: 'Укажите статью расходов' });
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ error: 'Укажите корректную сумму расхода' });
+    }
+    if (!expenseDate) {
+      return res.status(400).json({ error: 'Укажите корректную дату расхода' });
+    }
+
+    const categoryResult = await pool.query(
+      `
+      SELECT id, code, name_ru, name_uz
+      FROM organization_expense_categories
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [categoryId]
+    );
+    if (categoryResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Статья расходов не найдена' });
+    }
+    const category = categoryResult.rows[0];
+
+    const updatedResult = await pool.query(
+      `
+      UPDATE organization_expenses
+      SET
+        category_id = $1,
+        amount = $2,
+        currency_code = $3,
+        expense_date = $4,
+        description = $5,
+        updated_by = $6,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $7
+      RETURNING id, category_id, amount, currency_code, expense_date, description, created_at, updated_at
+      `,
+      [categoryId, amount, currencyCode, expenseDate, description, req.user.id, expenseId]
+    );
+
+    res.json({
+      ...updatedResult.rows[0],
+      amount: roundMoneyValue(updatedResult.rows[0]?.amount),
+      currency_code: normalizeExpenseCurrencyCode(updatedResult.rows[0]?.currency_code, currencyCode),
+      category_code: String(category.code || '').trim().toLowerCase() || null,
+      category_name_ru: String(category.name_ru || '').trim(),
+      category_name_uz: String(category.name_uz || '').trim()
+    });
+  } catch (error) {
+    console.error('Update organization expense error:', error);
+    res.status(500).json({ error: 'Ошибка обновления расхода' });
+  }
+});
+
+router.delete('/founders/expenses/:id', async (req, res) => {
+  try {
+    if (!ensureFoundersAccessByPassword(req, res)) return;
+    await ensureOrganizationExpensesSchema();
+
+    const expenseId = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(expenseId) || expenseId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID расхода' });
+    }
+
+    const deletedResult = await pool.query(
+      `
+      DELETE FROM organization_expenses
+      WHERE id = $1
+      RETURNING id
+      `,
+      [expenseId]
+    );
+    if (deletedResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Расход не найден' });
+    }
+
+    res.json({ success: true, id: expenseId });
+  } catch (error) {
+    console.error('Delete organization expense error:', error);
+    res.status(500).json({ error: 'Ошибка удаления расхода' });
+  }
+});
+
+// Возврат средств с баланса ресторана
+router.post('/restaurants/:id/refund', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { amount, description } = req.body;
+    const restaurantId = req.params.id;
+    const amountValue = Number(amount);
+
+    if (!Number.isFinite(amountValue) || amountValue <= 0) {
+      return res.status(400).json({ error: 'Некорректная сумма возврата' });
+    }
+
+    await client.query('BEGIN');
+
+    const restaurantResult = await client.query(
+      'SELECT id, name, balance, currency_code FROM restaurants WHERE id = $1 FOR UPDATE',
+      [restaurantId]
+    );
+    if (!restaurantResult.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Ресторан не найден' });
+    }
+
+    const currentBalance = Number(restaurantResult.rows[0].balance || 0);
+    if (currentBalance < amountValue) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Недостаточно средств на балансе для возврата' });
+    }
+
+    const updatedRest = await client.query(`
+      UPDATE restaurants
+      SET balance = balance - $1
+      WHERE id = $2
+      RETURNING id, name, balance, currency_code
+    `, [amountValue, restaurantId]);
+
+    const transactionResult = await client.query(`
+      INSERT INTO billing_transactions (restaurant_id, user_id, amount, type, description)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id, restaurant_id, user_id, amount, type, description, created_at
+    `, [restaurantId, req.user.id, amountValue, 'refund', description || 'Ручной возврат суперадмином']);
+
+    await client.query('COMMIT');
+
+    res.json({
+      ...updatedRest.rows[0],
+      transaction: transactionResult.rows[0] || null
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Restaurant refund error:', error);
+    res.status(500).json({ error: 'Ошибка возврата средств' });
+  } finally {
+    client.release();
+  }
+});
+
+// Изменить статус бесплатного тарифа
+router.patch('/restaurants/:id/free-tier', async (req, res) => {
+  try {
+    const { is_free_tier } = req.body;
+    const result = await pool.query(
+      'UPDATE restaurants SET is_free_tier = $1 WHERE id = $2 RETURNING id, is_free_tier',
+      [is_free_tier, req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Ресторан не найден' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Free tier toggle error:', error);
+    res.status(500).json({ error: 'Ошибка изменения тарифа' });
+  }
+});
+
+// Переключить статус "Бесплатный тариф"
+router.post('/restaurants/:id/toggle-free', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      UPDATE restaurants 
+      SET is_free_tier = NOT is_free_tier 
+      WHERE id = $1 
+      RETURNING id, is_free_tier
+    `, [req.params.id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Ресторан не найден' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Toggle free tier error:', error);
+    res.status(500).json({ error: 'Ошибка изменения тарифа' });
+  }
+});
+
+router.patch('/restaurants/:id/quick-settings', async (req, res) => {
+  try {
+    await ensureReservationSchema();
+    const restaurantId = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(restaurantId) || restaurantId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID магазина' });
+    }
+
+    const hasReservationEnabled = Object.prototype.hasOwnProperty.call(req.body || {}, 'reservation_enabled');
+    const hasSizeVariantsEnabled = Object.prototype.hasOwnProperty.call(req.body || {}, 'size_variants_enabled');
+    if (!hasReservationEnabled && !hasSizeVariantsEnabled) {
+      return res.status(400).json({ error: 'Нет данных для обновления' });
+    }
+
+    const currentResult = await pool.query(
+      `SELECT id, size_variants_enabled
+       FROM restaurants
+       WHERE id = $1
+       LIMIT 1`,
+      [restaurantId]
+    );
+    if (!currentResult.rows.length) {
+      return res.status(404).json({ error: 'Магазин не найден' });
+    }
+
+    const current = currentResult.rows[0];
+    const nextSizeVariantsEnabled = hasSizeVariantsEnabled
+      ? normalizeBooleanFlag(req.body?.size_variants_enabled, current.size_variants_enabled === true)
+      : (current.size_variants_enabled === true);
+
+    if (hasSizeVariantsEnabled) {
+      await pool.query(
+        `UPDATE restaurants
+         SET size_variants_enabled = $1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2`,
+        [nextSizeVariantsEnabled, restaurantId]
+      );
+    }
+
+    if (hasReservationEnabled) {
+      const nextReservationEnabled = normalizeBooleanFlag(req.body?.reservation_enabled, false);
+      await ensureRestaurantReservationSettingsRow(pool, restaurantId);
+      await pool.query(
+        `UPDATE restaurant_reservation_settings
+         SET enabled = $1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE restaurant_id = $2`,
+        [nextReservationEnabled, restaurantId]
+      );
+    }
+
+    const updatedResult = await pool.query(
+      `SELECT r.id,
+              r.size_variants_enabled,
+              COALESCE(rs.enabled, false) AS reservation_enabled
+       FROM restaurants r
+       LEFT JOIN restaurant_reservation_settings rs ON rs.restaurant_id = r.id
+       WHERE r.id = $1
+       LIMIT 1`,
+      [restaurantId]
+    );
+
+    if (!updatedResult.rows.length) {
+      return res.status(404).json({ error: 'Магазин не найден' });
+    }
+
+    const updated = updatedResult.rows[0];
+    try {
+      await reloadMultiBots();
+    } catch (reloadErr) {
+      console.error('Multi-bot reload warning after quick restaurant settings update:', reloadErr.message);
+    }
+
+    res.json({
+      id: updated.id,
+      reservation_enabled: updated.reservation_enabled === true || updated.reservation_enabled === 'true',
+      size_variants_enabled: updated.size_variants_enabled === true
+    });
+  } catch (error) {
+    console.error('Quick restaurant settings update error:', error);
+    res.status(500).json({ error: 'Ошибка обновления быстрых настроек магазина' });
+  }
+});
+
+router.post('/restaurants/:id(\\d+)/guvohnoma', (req, res) => {
+  guvohnomaUpload.single('file')(req, res, async (uploadError) => {
+    if (uploadError) {
+      const isSizeError = uploadError.code === 'LIMIT_FILE_SIZE';
+      return res.status(400).json({
+        error: isSizeError
+          ? 'Файл слишком большой. Максимальный размер: 15 MB'
+          : (uploadError.message || 'Не удалось загрузить гувохнома')
+      });
+    }
+
+    try {
+      await ensureRestaurantGuvohnomaSchema();
+      const restaurantId = Number.parseInt(req.params.id, 10);
+      if (!Number.isFinite(restaurantId) || restaurantId <= 0) {
+        return res.status(400).json({ error: 'Некорректный ID магазина' });
+      }
+      if (!req.file) {
+        return res.status(400).json({ error: 'Файл не выбран' });
+      }
+
+      assertGuvohnomaBufferIsValid(req.file);
+      const restaurantResult = await pool.query(
+        'SELECT id FROM restaurants WHERE id = $1 LIMIT 1',
+        [restaurantId]
+      );
+      if (restaurantResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Магазин не найден' });
+      }
+      const filesCountResult = await pool.query(
+        'SELECT COUNT(*)::int AS total FROM restaurant_guvohnoma_files WHERE restaurant_id = $1',
+        [restaurantId]
+      );
+      const filesCount = Number(filesCountResult.rows[0]?.total || 0);
+      if (filesCount >= GUVOHNOMA_MAX_FILES_PER_RESTAURANT) {
+        return res.status(400).json({ error: 'Можно загрузить максимум 5 файлов гувохнома' });
+      }
+
+      const filename = buildGuvohnomaFilename(restaurantId, req.file.originalname);
+      const filePath = path.join(guvohnomaUploadsDir, filename);
+      await fs.promises.writeFile(filePath, req.file.buffer);
+
+      const fileUrl = `/uploads/guvohnoma/${filename}`;
+      const originalName = sanitizeGuvohnomaOriginalName(req.file.originalname);
+      const uploadedById = Number.isFinite(Number(req.user?.id)) ? Number(req.user.id) : null;
+      const uploadedByName = sanitizeGuvohnomaOriginalName(
+        req.user?.full_name || req.user?.username || 'Суперадмин'
+      );
+      const insertedResult = await pool.query(`
+        INSERT INTO restaurant_guvohnoma_files (
+          restaurant_id,
+          file_url,
+          file_name,
+          file_mime,
+          file_size,
+          uploaded_by_id,
+          uploaded_by_name
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING
+          id,
+          restaurant_id,
+          file_url,
+          file_name,
+          file_mime,
+          file_size,
+          uploaded_by_id,
+          uploaded_by_name,
+          created_at
+      `, [
+        restaurantId,
+        fileUrl,
+        originalName,
+        String(req.file.mimetype || '').toLowerCase(),
+        Number(req.file.size || req.file.buffer.length || 0),
+        uploadedById,
+        uploadedByName
+      ]);
+
+      const fileRow = insertedResult.rows[0];
+      await pool.query(`
+        UPDATE restaurants
+        SET guvohnoma_file_url = $1,
+            guvohnoma_file_name = $2,
+            guvohnoma_file_mime = $3,
+            guvohnoma_file_size = $4,
+            guvohnoma_uploaded_by_id = $5,
+            guvohnoma_uploaded_by_name = $6,
+            guvohnoma_uploaded_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $7
+      `, [
+        fileUrl,
+        originalName,
+        String(req.file.mimetype || '').toLowerCase(),
+        Number(req.file.size || req.file.buffer.length || 0),
+        uploadedById,
+        uploadedByName,
+        restaurantId
+      ]);
+
+      return res.json({
+        message: 'Гувохнома загружена',
+        file: fileRow,
+        restaurant: {
+          id: restaurantId,
+          guvohnoma_file_url: fileRow.file_url,
+          guvohnoma_file_name: fileRow.file_name,
+          guvohnoma_file_mime: fileRow.file_mime,
+          guvohnoma_file_size: fileRow.file_size,
+          guvohnoma_uploaded_at: fileRow.created_at,
+          guvohnoma_uploaded_by_id: fileRow.uploaded_by_id,
+          guvohnoma_uploaded_by_name: fileRow.uploaded_by_name
+        }
+      });
+    } catch (error) {
+      console.error('Restaurant guvohnoma upload error:', error);
+      const message = String(error?.message || '');
+      if (message.includes('Некоррект') || message.includes('поврежден') || message.includes('JPG') || message.includes('PNG') || message.includes('PDF')) {
+        return res.status(400).json({ error: message });
+      }
+      return res.status(500).json({ error: 'Ошибка загрузки гувохнома' });
+    }
+  });
+});
+
+router.delete('/restaurants/:id(\\d+)/guvohnoma/:fileId(\\d+)', async (req, res) => {
+  try {
+    await ensureRestaurantGuvohnomaSchema();
+    const restaurantId = Number.parseInt(req.params.id, 10);
+    const fileId = Number.parseInt(req.params.fileId, 10);
+    if (!Number.isFinite(restaurantId) || restaurantId <= 0 || !Number.isFinite(fileId) || fileId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID файла' });
+    }
+
+    const fileResult = await pool.query(
+      'SELECT * FROM restaurant_guvohnoma_files WHERE id = $1 AND restaurant_id = $2 LIMIT 1',
+      [fileId, restaurantId]
+    );
+    if (fileResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Файл не найден' });
+    }
+
+    const fileRow = fileResult.rows[0];
+    await pool.query(
+      'DELETE FROM restaurant_guvohnoma_files WHERE id = $1 AND restaurant_id = $2',
+      [fileId, restaurantId]
+    );
+
+    const previousUrl = String(fileRow.file_url || '');
+    if (previousUrl.startsWith('/uploads/guvohnoma/')) {
+      const previousPath = path.join(uploadsDir, previousUrl.replace(/^\/uploads\//, ''));
+      if (previousPath.startsWith(guvohnomaUploadsDir)) {
+        fs.promises.unlink(previousPath).catch(() => {});
+      }
+    }
+
+    const latestResult = await pool.query(`
+      SELECT *
+      FROM restaurant_guvohnoma_files
+      WHERE restaurant_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `, [restaurantId]);
+    const latest = latestResult.rows[0] || null;
+    await pool.query(`
+      UPDATE restaurants
+      SET guvohnoma_file_url = $1,
+          guvohnoma_file_name = $2,
+          guvohnoma_file_mime = $3,
+          guvohnoma_file_size = $4,
+          guvohnoma_uploaded_at = $5,
+          guvohnoma_uploaded_by_id = $6,
+          guvohnoma_uploaded_by_name = $7,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $8
+    `, [
+      latest?.file_url || null,
+      latest?.file_name || null,
+      latest?.file_mime || null,
+      latest?.file_size || 0,
+      latest?.created_at || null,
+      latest?.uploaded_by_id || null,
+      latest?.uploaded_by_name || null,
+      restaurantId
+    ]);
+
+    return res.json({
+      message: 'Гувохнома удалена',
+      deleted_file_id: fileId,
+      restaurant: {
+        id: restaurantId,
+        guvohnoma_file_url: latest?.file_url || null,
+        guvohnoma_file_name: latest?.file_name || null,
+        guvohnoma_file_mime: latest?.file_mime || null,
+        guvohnoma_file_size: latest?.file_size || 0,
+        guvohnoma_uploaded_at: latest?.created_at || null,
+        guvohnoma_uploaded_by_id: latest?.uploaded_by_id || null,
+        guvohnoma_uploaded_by_name: latest?.uploaded_by_name || null
+      }
+    });
+  } catch (error) {
+    console.error('Restaurant guvohnoma file delete error:', error);
+    res.status(500).json({ error: 'Ошибка удаления гувохнома' });
+  }
+});
+
+router.delete('/restaurants/:id(\\d+)/guvohnoma', async (req, res) => {
+  try {
+    await ensureRestaurantGuvohnomaSchema();
+    const restaurantId = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(restaurantId) || restaurantId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID магазина' });
+    }
+
+    const currentResult = await pool.query(
+      'SELECT id, guvohnoma_file_url FROM restaurants WHERE id = $1 LIMIT 1',
+      [restaurantId]
+    );
+    if (currentResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Магазин не найден' });
+    }
+
+    const filesResult = await pool.query(
+      'SELECT file_url FROM restaurant_guvohnoma_files WHERE restaurant_id = $1',
+      [restaurantId]
+    );
+    await pool.query('DELETE FROM restaurant_guvohnoma_files WHERE restaurant_id = $1', [restaurantId]);
+
+    const updatedResult = await pool.query(`
+      UPDATE restaurants
+      SET guvohnoma_file_url = NULL,
+          guvohnoma_file_name = NULL,
+          guvohnoma_file_mime = NULL,
+          guvohnoma_file_size = 0,
+          guvohnoma_uploaded_at = NULL,
+          guvohnoma_uploaded_by_id = NULL,
+          guvohnoma_uploaded_by_name = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      RETURNING
+        id,
+        guvohnoma_file_url,
+        guvohnoma_file_name,
+        guvohnoma_file_mime,
+        guvohnoma_file_size,
+        guvohnoma_uploaded_at,
+        guvohnoma_uploaded_by_id,
+        guvohnoma_uploaded_by_name
+    `, [restaurantId]);
+
+    const previousUrl = String(currentResult.rows[0]?.guvohnoma_file_url || '');
+    const urlsToDelete = [
+      previousUrl,
+      ...(Array.isArray(filesResult.rows) ? filesResult.rows.map((row) => row.file_url) : [])
+    ];
+    for (const rawUrl of new Set(urlsToDelete.map((item) => String(item || '')).filter(Boolean))) {
+      if (!rawUrl.startsWith('/uploads/guvohnoma/')) continue;
+      const previousPath = path.join(uploadsDir, rawUrl.replace(/^\/uploads\//, ''));
+      if (previousPath.startsWith(guvohnomaUploadsDir)) {
+        fs.promises.unlink(previousPath).catch(() => {});
+      }
+    }
+    res.json({
+      message: 'Гувохнома удалена',
+      restaurant: updatedResult.rows[0]
+    });
+  } catch (error) {
+    console.error('Restaurant guvohnoma delete error:', error);
+    res.status(500).json({ error: 'Ошибка удаления гувохнома' });
+  }
+});
+
+
+// Получить один ресторан
+router.get('/restaurants/:id(\\d+)', async (req, res) => {
+  try {
+    await ensureActivityTypesSchema();
+    await ensureRestaurantCurrencySchema();
+    await ensureRestaurantWorkflowStatusSchema();
+    await ensureRestaurantGuvohnomaSchema();
+    await ensureReservationSchema();
+    const result = await pool.query(`
+      SELECT r.*,
+        bat.name AS activity_type_name,
+        bat.is_visible AS activity_type_is_visible,
+        COALESCE(rs.enabled, false) AS reservation_enabled_setting,
+        COALESCE(rs.reservation_service_cost, COALESCE(r.reservation_cost, 0)) AS reservation_service_cost,
+        (SELECT COUNT(*) FROM operator_restaurants WHERE restaurant_id = r.id) as operators_count,
+        (
+          SELECT MAX(u.last_activity_at)
+          FROM operator_restaurants opr
+          INNER JOIN users u ON u.id = opr.user_id
+          WHERE opr.restaurant_id = r.id
+            AND u.role = 'operator'
+        ) AS latest_operator_activity_at,
+        (
+          SELECT COUNT(*)
+          FROM operator_restaurants opr
+          INNER JOIN users u ON u.id = opr.user_id
+          WHERE opr.restaurant_id = r.id
+            AND u.role = 'operator'
+            AND u.is_active = true
+        ) AS active_operators_count,
+        COALESCE(gf.guvohnoma_files, '[]'::jsonb) AS guvohnoma_files
+      FROM restaurants r
+      LEFT JOIN business_activity_types bat ON bat.id = r.activity_type_id
+      LEFT JOIN restaurant_reservation_settings rs ON rs.restaurant_id = r.id
+      LEFT JOIN LATERAL (
+        SELECT jsonb_agg(
+          jsonb_build_object(
+            'id', rgf.id,
+            'file_url', rgf.file_url,
+            'file_name', rgf.file_name,
+            'file_mime', rgf.file_mime,
+            'file_size', rgf.file_size,
+            'uploaded_by_id', rgf.uploaded_by_id,
+            'uploaded_by_name', rgf.uploaded_by_name,
+            'created_at', rgf.created_at
+          )
+          ORDER BY rgf.created_at DESC, rgf.id DESC
+        ) AS guvohnoma_files
+        FROM restaurant_guvohnoma_files rgf
+        WHERE rgf.restaurant_id = r.id
+      ) gf ON true
+      WHERE r.id = $1
+    `, [req.params.id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Ресторан не найден' });
+    }
+
+    // Get operators for this restaurant
+    const operatorsResult = await pool.query(`
+      SELECT u.id, u.username, u.full_name, u.phone
+      FROM users u
+      INNER JOIN operator_restaurants opr ON u.id = opr.user_id
+      WHERE opr.restaurant_id = $1
+    `, [req.params.id]);
+
+    let restaurant = {
+      ...result.rows[0],
+      reservation_enabled: result.rows[0].reservation_enabled_setting === true || result.rows[0].reservation_enabled_setting === 'true'
+    };
+    restaurant.operators = operatorsResult.rows;
+    restaurant = await enrichRestaurantWithBotMeta(restaurant);
+    restaurant = enrichRestaurantWithWorkflowStatus(restaurant);
+
+    res.json(restaurant);
+  } catch (error) {
+    console.error('Get restaurant error:', error);
+    res.status(500).json({ error: 'Ошибка получения ресторана' });
+  }
+});
+
+// Добавить ресторан
+router.post('/restaurants', async (req, res) => {
+  try {
+    await ensureActivityTypesSchema();
+    await ensureRestaurantCurrencySchema();
+    await ensureRestaurantWorkflowStatusSchema();
+    await ensureRestaurantShowContactsSchema();
+    await ensureRestaurantNamePolicy();
+    const {
+      name, address, phone, logo_url, logo_display_mode, ui_theme, delivery_zone, telegram_bot_token, telegram_group_id,
+      operator_registration_code, start_time, end_time, click_url, payme_url, is_delivery_enabled,
+      support_username, latitude, longitude, delivery_base_radius, delivery_base_price, delivery_price_per_km,
+      payme_enabled, payme_merchant_id, payme_api_login, payme_api_password, payme_account_key, payme_test_mode, payme_callback_timeout_ms,
+      currency_code, reservation_enabled
+    } = req.body;
+    const normalizedShowStoreContacts = normalizeBooleanFlag(req.body?.show_store_contacts, false);
+    const normalizedBotTokenRaw = telegram_bot_token === undefined || telegram_bot_token === null
+      ? null
+      : String(telegram_bot_token).trim();
+    const normalizedBotToken = normalizedBotTokenRaw === '' ? null : normalizedBotTokenRaw;
+    const normalizedGroupId = telegram_group_id === undefined || telegram_group_id === null
+      ? null
+      : String(telegram_group_id).trim();
+    const normalizedLogoDisplayMode = normalizeLogoDisplayMode(logo_display_mode, 'square');
+    const normalizedUiTheme = normalizeUiTheme(ui_theme, 'talablar_blue');
+    const activityTypeId = normalizeActivityTypeId(req.body?.activity_type_id);
+    const normalizedCurrencyCode = normalizeRestaurantCurrencyCode(currency_code, 'uz');
+    const normalizedSizeVariantsEnabled = normalizeBooleanFlag(req.body?.size_variants_enabled, false);
+    const normalizedSupportUsername = String(support_username || '').trim().replace(/^@+/, '') || null;
+    const normalizedLatitude = latitude === '' || latitude === null || latitude === undefined ? null : Number.parseFloat(latitude);
+    const normalizedLongitude = longitude === '' || longitude === null || longitude === undefined ? null : Number.parseFloat(longitude);
+    const parsedDeliveryBaseRadius = Number.parseFloat(delivery_base_radius);
+    const parsedDeliveryBasePrice = Number.parseFloat(delivery_base_price);
+    const parsedDeliveryPricePerKm = Number.parseFloat(delivery_price_per_km);
+
+    const nameValidation = name
+      ? validateRestaurantName(name)
+      : { ok: true, code: 'OK', message: '', normalized: '', invalidChar: '' };
+    if (!nameValidation.ok) {
+      return res.status(400).json({
+        error: nameValidation.message,
+        code: nameValidation.code,
+        invalid_symbol: nameValidation.invalidChar || null
+      });
+    }
+    const normalizedStoreName = normalizeRestaurantNameForStorage(nameValidation.normalized);
+
+    const createAvailability = await checkRestaurantIdentityAvailability({
+      client: pool,
+      name: normalizedStoreName,
+      telegramBotToken: normalizedBotToken,
+      telegramGroupId: normalizedGroupId
+    });
+    if (createAvailability.nameTaken) {
+      return res.status(409).json({ error: 'Название магазина уже используется' });
+    }
+    if (createAvailability.tokenTaken) {
+      return res.status(409).json({ error: 'Этот Bot Token уже используется в другом магазине' });
+    }
+    if (createAvailability.groupIdTaken) {
+      return res.status(409).json({ error: 'Этот Group ID уже используется в другом магазине' });
+    }
+
+    if (activityTypeId) {
+      const activityTypeResult = await pool.query(
+        'SELECT id FROM business_activity_types WHERE id = $1 LIMIT 1',
+        [activityTypeId]
+      );
+      if (activityTypeResult.rows.length === 0) {
+        return res.status(400).json({ error: 'Выбранный вид деятельности не найден' });
+      }
+    }
+
+    console.log('📍 Creating restaurant with delivery_zone:', delivery_zone);
+
+    // Get default billing settings
+    const settingsResult = await pool.query('SELECT default_starting_balance, default_order_cost FROM billing_settings WHERE id = 1');
+    const settings = settingsResult.rows[0] || { default_starting_balance: 100000, default_order_cost: 1000 };
+    const parsedServiceFee = parseFlexibleAmount(req.body.service_fee, 0);
+    const parsedReservationCost = parseFlexibleAmount(req.body.reservation_cost, 0);
+    const parsedOrderCost = req.body.service_fee !== undefined
+      ? parsedServiceFee
+      : parseFlexibleAmount(settings.default_order_cost, 1000);
+    await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS reservation_cost DECIMAL(12, 2) DEFAULT 0');
+
+    const result = await pool.query(`
+      INSERT INTO restaurants (
+        name, address, phone, logo_url, delivery_zone, 
+        logo_display_mode, ui_theme,
+        telegram_bot_token, telegram_group_id, operator_registration_code, start_time, end_time, 
+        click_url, payme_url, is_delivery_enabled, service_fee,
+        balance, order_cost, activity_type_id, currency_code,
+        support_username, latitude, longitude, delivery_base_radius, delivery_base_price, delivery_price_per_km,
+        payme_enabled, payme_merchant_id, payme_api_login, payme_api_password, payme_account_key, payme_test_mode, payme_callback_timeout_ms,
+        size_variants_enabled,
+        segment_pricing_enabled, delivery_lead_enabled,
+        product_field_description_enabled, product_field_season_enabled,
+        product_field_barcode_enabled, product_field_ikpu_enabled
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34,
+        false, false,
+        true, false,
+        false, false)
+      RETURNING *
+    `, [
+      normalizedStoreName,
+      address,
+      phone,
+      logo_url,
+      delivery_zone ? JSON.stringify(delivery_zone) : null,
+      normalizedLogoDisplayMode,
+      normalizedUiTheme,
+      normalizedBotToken,
+      normalizedGroupId,
+      operator_registration_code || null,
+      start_time,
+      end_time,
+      click_url || null,
+      payme_url || null,
+      is_delivery_enabled !== undefined ? is_delivery_enabled : true,
+      parsedServiceFee,
+      settings.default_starting_balance,
+      parsedOrderCost,
+      activityTypeId,
+      normalizedCurrencyCode,
+      normalizedSupportUsername,
+      Number.isFinite(normalizedLatitude) ? normalizedLatitude : null,
+      Number.isFinite(normalizedLongitude) ? normalizedLongitude : null,
+      Number.isFinite(parsedDeliveryBaseRadius) ? parsedDeliveryBaseRadius : 2,
+      Number.isFinite(parsedDeliveryBasePrice) ? parsedDeliveryBasePrice : 5000,
+      Number.isFinite(parsedDeliveryPricePerKm) ? parsedDeliveryPricePerKm : 2000,
+      payme_enabled === true || payme_enabled === 'true',
+      payme_merchant_id || null,
+      payme_api_login || null,
+      payme_api_password || null,
+      payme_account_key || 'order_id',
+      payme_test_mode === true || payme_test_mode === 'true',
+      Number.isInteger(Number(payme_callback_timeout_ms)) ? Number(payme_callback_timeout_ms) : 2000,
+      normalizedSizeVariantsEnabled
+    ]);
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'timezone')) {
+      let tzValue = String(req.body.timezone || '').trim();
+      if (tzValue) {
+        try { new Intl.DateTimeFormat('en-US', { timeZone: tzValue }); } catch (_) { tzValue = ''; }
+      }
+      if (tzValue) {
+        await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS timezone VARCHAR(64)').catch(() => {});
+        await pool.query('UPDATE restaurants SET timezone = $1 WHERE id = $2', [tzValue, result.rows[0].id]).catch(() => {});
+        result.rows[0].timezone = tzValue;
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'mobile_product_columns')) {
+      const cols = Number.parseInt(req.body.mobile_product_columns, 10);
+      if (cols === 2 || cols === 3) {
+        await pool.query('UPDATE restaurants SET mobile_product_columns = $1 WHERE id = $2', [cols, result.rows[0].id]).catch(() => {});
+        result.rows[0].mobile_product_columns = cols;
+      }
+    }
+
+    await pool.query(
+      'UPDATE restaurants SET reservation_cost = $1 WHERE id = $2',
+      [parsedReservationCost, result.rows[0].id]
+    );
+
+    await pool.query(
+      'UPDATE restaurants SET show_store_contacts = $1 WHERE id = $2',
+      [normalizedShowStoreContacts, result.rows[0].id]
+    ).catch(() => {});
+
+    const reservationEnabled = reservation_enabled === true || reservation_enabled === 'true';
+    await ensureRestaurantReservationSettingsRow(pool, result.rows[0].id);
+    await pool.query(
+      `UPDATE restaurant_reservation_settings
+       SET enabled = $1,
+           reservation_service_cost = $2,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE restaurant_id = $3`,
+      [reservationEnabled, parsedReservationCost, result.rows[0].id]
+    );
+
+    const restaurant = {
+      ...result.rows[0],
+      show_store_contacts: normalizedShowStoreContacts,
+      reservation_cost: parsedReservationCost,
+      reservation_enabled: reservationEnabled,
+      reservation_service_cost: parsedReservationCost
+    };
+
+    // Copy template categories to the new restaurant
+    try {
+      await copyTemplateCategoriesToRestaurant(pool, result.rows[0].id);
+      console.log(`Successfully copied template categories to new restaurant #${result.rows[0].id}`);
+    } catch (copyErr) {
+      console.error('Error copying template categories to new restaurant:', copyErr);
+    }
+
+    // Отвечаем сразу; перезапуск ботов и лог делаем в фоне, чтобы не ждать Telegram API.
+    res.status(201).json(restaurant);
+
+    const hasBotTokenForReload = Boolean(normalizedBotToken);
+    setImmediate(async () => {
+      // Перезапуск ботов нужен только если у нового магазина задан токен бота.
+      if (hasBotTokenForReload) {
+        try {
+          await reloadMultiBots();
+        } catch (reloadErr) {
+          console.error('Multi-bot reload warning after restaurant create:', reloadErr.message);
+        }
+      }
+
+      try {
+        await logActivity({
+          userId: req.user.id,
+          restaurantId: restaurant.id,
+          actionType: ACTION_TYPES.CREATE_RESTAURANT,
+          entityType: ENTITY_TYPES.RESTAURANT,
+          entityId: restaurant.id,
+          entityName: restaurant.name,
+          newValues: restaurant,
+          ipAddress: getIpFromRequest(req),
+          userAgent: getUserAgentFromRequest(req)
+        });
+      } catch (logErr) {
+        console.error('Create restaurant activity log warning:', logErr.message);
+      }
+    });
+  } catch (error) {
+    console.error('Create restaurant error:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Ошибка создания ресторана' });
+    }
+  }
+});
+
+// Обновить ресторан
+router.put('/restaurants/:id', async (req, res) => {
+  try {
+    await ensureActivityTypesSchema();
+    await ensureRestaurantCurrencySchema();
+    await ensureRestaurantWorkflowStatusSchema();
+    await ensureRestaurantShowContactsSchema();
+    await ensureRestaurantNamePolicy();
+    const {
+      name, address, phone, logo_url, logo_display_mode, ui_theme, delivery_zone, telegram_bot_token, telegram_group_id,
+      operator_registration_code, is_active, start_time, end_time, click_url, payme_url, support_username, service_fee, reservation_cost,
+      latitude, longitude, delivery_base_radius, delivery_base_price, delivery_price_per_km, is_delivery_enabled,
+      payme_enabled, payme_merchant_id, payme_api_login, payme_api_password, payme_account_key, payme_test_mode, payme_callback_timeout_ms,
+      currency_code, reservation_enabled
+    } = req.body;
+    const normalizedBotTokenRaw = telegram_bot_token === undefined || telegram_bot_token === null
+      ? null
+      : String(telegram_bot_token).trim();
+    const normalizedBotToken = normalizedBotTokenRaw === '' ? null : normalizedBotTokenRaw;
+    const normalizedGroupId = telegram_group_id === undefined || telegram_group_id === null
+      ? null
+      : String(telegram_group_id).trim();
+    const hasActivityTypeField = Object.prototype.hasOwnProperty.call(req.body || {}, 'activity_type_id');
+    const activityTypeId = normalizeActivityTypeId(req.body?.activity_type_id);
+
+    // Get old values for logging
+    const oldResult = await pool.query('SELECT * FROM restaurants WHERE id = $1', [req.params.id]);
+    if (oldResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Ресторан не найден' });
+    }
+    const oldValues = oldResult.rows[0];
+    const nextNameValidation = validateRestaurantName(name ?? oldValues.name ?? '');
+    if (!nextNameValidation.ok) {
+      return res.status(400).json({
+        error: nextNameValidation.message,
+        code: nextNameValidation.code,
+        invalid_symbol: nextNameValidation.invalidChar || null
+      });
+    }
+    const nextNameForCheck = normalizeRestaurantNameForStorage(nextNameValidation.normalized);
+    const normalizedLogoDisplayMode = normalizeLogoDisplayMode(logo_display_mode, oldValues.logo_display_mode || 'square');
+    const normalizedUiTheme = normalizeUiTheme(ui_theme, oldValues.ui_theme || 'classic');
+    const normalizedCurrencyCode = normalizeRestaurantCurrencyCode(currency_code, oldValues.currency_code || 'uz');
+    const normalizedSizeVariantsEnabled = normalizeBooleanFlag(
+      req.body?.size_variants_enabled,
+      oldValues.size_variants_enabled === true
+    );
+    const normalizedShowStoreContacts = normalizeBooleanFlag(
+      req.body?.show_store_contacts,
+      oldValues.show_store_contacts === true
+    );
+    const previousBotToken = normalizeRestaurantTokenForCompare(oldValues.telegram_bot_token);
+    const nextBotToken = normalizedBotToken === null
+      ? previousBotToken
+      : normalizeRestaurantTokenForCompare(normalizedBotToken);
+    const isTokenChanging = normalizedBotToken !== null && nextBotToken !== previousBotToken;
+
+    const updateAvailability = await checkRestaurantIdentityAvailability({
+      client: pool,
+      name: nextNameForCheck,
+      telegramBotToken: normalizedBotToken === null ? previousBotToken : normalizedBotToken,
+      telegramGroupId: normalizedGroupId === null ? String(oldValues.telegram_group_id || '').trim() : normalizedGroupId,
+      excludeRestaurantId: Number(req.params.id)
+    });
+    if (updateAvailability.nameTaken) {
+      return res.status(409).json({ error: 'Название магазина уже используется' });
+    }
+    if (updateAvailability.tokenTaken) {
+      return res.status(409).json({ error: 'Этот Bot Token уже используется в другом магазине' });
+    }
+    if (updateAvailability.groupIdTaken) {
+      return res.status(409).json({ error: 'Этот Group ID уже используется в другом магазине' });
+    }
+
+    // Уведомление клиентов о смене токена и перезапуск ботов вынесены в фон
+    // (после ответа), чтобы сохранение магазина не блокировалось недоступным
+    // старым ботом / медленными вызовами Telegram API. См. блок в конце обработчика.
+
+    // Store timezone (IANA) — used by analytics to bucket order times by local hour.
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'timezone')) {
+      let tzValue = String(req.body.timezone || '').trim();
+      if (tzValue) {
+        try { new Intl.DateTimeFormat('en-US', { timeZone: tzValue }); } catch (_) { tzValue = ''; }
+      }
+      if (tzValue) {
+        await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS timezone VARCHAR(64)').catch(() => {});
+        await pool.query(
+          'UPDATE restaurants SET timezone = $1 WHERE id = $2',
+          [tzValue, Number(req.params.id)]
+        ).catch(() => {});
+      }
+    }
+
+    console.log('📍 Updating restaurant with delivery_zone:', delivery_zone);
+    const parsedServiceFee = parseFlexibleAmount(service_fee, 0);
+    const parsedReservationCost = parseFlexibleAmount(
+      reservation_cost,
+      oldValues.hasOwnProperty('reservation_cost') ? oldValues.reservation_cost : 0
+    );
+
+    // Check if service_fee column exists, if not - create it
+    const hasServiceFee = oldValues.hasOwnProperty('service_fee');
+    if (!hasServiceFee) {
+      try {
+        await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS service_fee DECIMAL(10, 2) DEFAULT 0');
+        console.log('✅ Added service_fee column to restaurants');
+      } catch (e) {
+        console.log('ℹ️ service_fee column:', e.message);
+      }
+    }
+
+    const hasReservationCost = oldValues.hasOwnProperty('reservation_cost');
+    if (!hasReservationCost) {
+      try {
+        await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS reservation_cost DECIMAL(12, 2) DEFAULT 0');
+        console.log('✅ Added reservation_cost column to restaurants');
+      } catch (e) {
+        console.log('ℹ️ reservation_cost column:', e.message);
+      }
+    }
+
+    // Check if latitude/longitude columns exist
+    const hasCoords = oldValues.hasOwnProperty('latitude');
+    if (!hasCoords) {
+      try {
+        await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS latitude DECIMAL(10, 8)');
+        await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS longitude DECIMAL(11, 8)');
+        console.log('✅ Added latitude/longitude columns to restaurants');
+      } catch (e) {
+        console.log('ℹ️ latitude/longitude columns:', e.message);
+      }
+    }
+
+    // Check if delivery settings columns exist
+    const hasDeliverySettings = oldValues.hasOwnProperty('delivery_base_radius');
+    if (!hasDeliverySettings) {
+      try {
+        await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS delivery_base_radius DECIMAL(5, 2) DEFAULT 2');
+        await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS delivery_base_price DECIMAL(10, 2) DEFAULT 5000');
+        await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS delivery_price_per_km DECIMAL(10, 2) DEFAULT 2000');
+        console.log('✅ Added delivery settings columns to restaurants');
+      } catch (e) {
+        console.log('ℹ️ delivery settings columns:', e.message);
+      }
+    }
+
+    // Check if delivery flag exists
+    const hasDeliveryFlag = oldValues.hasOwnProperty('is_delivery_enabled');
+    if (!hasDeliveryFlag) {
+      try {
+        await pool.query('ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS is_delivery_enabled BOOLEAN DEFAULT true');
+        console.log('✅ Added is_delivery_enabled column to restaurants');
+      } catch (e) {
+        console.log('ℹ️ is_delivery_enabled column:', e.message);
+      }
+    }
+
+    if (hasActivityTypeField && activityTypeId) {
+      const activityTypeResult = await pool.query(
+        'SELECT id FROM business_activity_types WHERE id = $1 LIMIT 1',
+        [activityTypeId]
+      );
+      if (activityTypeResult.rows.length === 0) {
+        return res.status(400).json({ error: 'Выбранный вид деятельности не найден' });
+      }
+    }
+
+    // Now update with all fields including coordinates and delivery settings
+    const result = await pool.query(`
+      UPDATE restaurants 
+      SET name = COALESCE($1, name),
+          address = COALESCE($2, address),
+          phone = COALESCE($3, phone),
+          logo_url = $4,
+          logo_display_mode = $5,
+          delivery_zone = $6,
+          telegram_bot_token = COALESCE($7, telegram_bot_token),
+          telegram_group_id = COALESCE($8, telegram_group_id),
+          is_active = COALESCE($9, is_active),
+          start_time = $10,
+          end_time = $11,
+          click_url = $12,
+          payme_url = $13,
+          support_username = $14,
+          operator_registration_code = $15,
+          service_fee = $16,
+          latitude = $17,
+          longitude = $18,
+          delivery_base_radius = $19,
+          delivery_base_price = $20,
+          delivery_price_per_km = $21,
+          is_delivery_enabled = $22,
+          order_cost = $23,
+          activity_type_id = $24,
+          payme_enabled = $25,
+          payme_merchant_id = $26,
+          payme_api_login = $27,
+          payme_api_password = $28,
+           payme_account_key = $29,
+           payme_test_mode = $30,
+           payme_callback_timeout_ms = $31,
+           currency_code = $32,
+           ui_theme = $33,
+           size_variants_enabled = $34,
+           show_store_contacts = $35,
+           updated_at = CURRENT_TIMESTAMP
+      WHERE id = $36
+      RETURNING *
+    `, [
+      name,
+      address,
+      phone,
+      logo_url,
+      normalizedLogoDisplayMode,
+      delivery_zone ? JSON.stringify(delivery_zone) : null,
+      normalizedBotToken,
+      normalizedGroupId,
+      is_active,
+      start_time || null,
+      end_time || null,
+      click_url || null,
+      payme_url || null,
+      support_username || null,
+      operator_registration_code || null,
+      parsedServiceFee,
+      latitude ? parseFloat(latitude) : null,
+      longitude ? parseFloat(longitude) : null,
+      parseFloat(delivery_base_radius) || 0,
+      parseFloat(delivery_base_price) || 0,
+      parseFloat(delivery_price_per_km) || 0,
+      is_delivery_enabled !== undefined ? is_delivery_enabled : true,
+      parsedServiceFee,
+      hasActivityTypeField ? activityTypeId : oldValues.activity_type_id || null,
+      payme_enabled === true || payme_enabled === 'true',
+      payme_merchant_id || null,
+      payme_api_login || null,
+      payme_api_password || null,
+      payme_account_key || 'order_id',
+      payme_test_mode === true || payme_test_mode === 'true',
+      Number.isInteger(Number(payme_callback_timeout_ms)) ? Number(payme_callback_timeout_ms) : 2000,
+      normalizedCurrencyCode,
+      normalizedUiTheme,
+      normalizedSizeVariantsEnabled,
+      normalizedShowStoreContacts,
+      req.params.id
+    ]);
+
+    await pool.query(
+      'UPDATE restaurants SET reservation_cost = $1 WHERE id = $2',
+      [parsedReservationCost, req.params.id]
+    );
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'mobile_product_columns')) {
+      const cols = Number.parseInt(req.body.mobile_product_columns, 10);
+      if (cols === 2 || cols === 3) {
+        await pool.query(
+          'UPDATE restaurants SET mobile_product_columns = $1 WHERE id = $2',
+          [cols, Number(req.params.id)]
+        ).catch(() => {});
+        if (result.rows[0]) {
+          result.rows[0].mobile_product_columns = cols;
+        }
+      }
+    }
+
+    const reservationEnabled = reservation_enabled === true || reservation_enabled === 'true';
+    await ensureRestaurantReservationSettingsRow(pool, req.params.id);
+    await pool.query(
+      `UPDATE restaurant_reservation_settings
+       SET enabled = $1,
+           reservation_service_cost = $2,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE restaurant_id = $3`,
+      [reservationEnabled, parsedReservationCost, req.params.id]
+    );
+
+    const restaurant = {
+      ...result.rows[0],
+      reservation_cost: parsedReservationCost,
+      reservation_enabled: reservationEnabled,
+      reservation_service_cost: parsedReservationCost
+    };
+
+    // Перезапуск ботов нужен только при смене токена или активации/деактивации
+    // магазина (бот привязан к токену). Для обычных правок (адрес, валюта,
+    // контакты и т.п.) дорогостоящий reloadMultiBots() пропускаем — это и было
+    // главной причиной долгого сохранения.
+    const nextIsActive = (is_active === undefined || is_active === null)
+      ? oldValues.is_active
+      : (is_active === true || is_active === 'true');
+    const isActiveChanging = Boolean(nextIsActive) !== Boolean(oldValues.is_active);
+    const needsBotReload = isTokenChanging || isActiveChanging;
+
+    // Отвечаем сразу — клиент не ждёт Telegram API и уведомления клиентов/операторов.
+    res.json({
+      ...restaurant,
+      token_migration: null,
+      operator_notification: null
+    });
+
+    // Фоновая работа: лог активности, уведомления и перезапуск ботов.
+    // Любые ошибки тут не должны влиять на уже отправленный ответ.
+    const oldBotToken = oldValues.telegram_bot_token;
+    const newBotTokenForBg = restaurant.telegram_bot_token;
+    setImmediate(async () => {
+      try {
+        await logActivity({
+          userId: req.user.id,
+          restaurantId: restaurant.id,
+          actionType: ACTION_TYPES.UPDATE_RESTAURANT,
+          entityType: ENTITY_TYPES.RESTAURANT,
+          entityId: restaurant.id,
+          entityName: restaurant.name,
+          oldValues,
+          newValues: restaurant,
+          ipAddress: getIpFromRequest(req),
+          userAgent: getUserAgentFromRequest(req)
+        });
+      } catch (logErr) {
+        console.error('Update restaurant activity log warning:', logErr.message);
+      }
+
+      // Уведомляем клиентов о переезде на новый бот — best-effort, без блокировки.
+      if (isTokenChanging && nextBotToken) {
+        try {
+          const migration = await notifyCustomersAboutRestaurantBotMigration({
+            restaurantId: parseInt(req.params.id, 10),
+            restaurantName: restaurant.name || oldValues.name || 'Ваш магазин',
+            oldToken: oldBotToken,
+            newToken: nextBotToken
+          });
+          if (migration && migration.ok === false) {
+            console.warn('Customer bot-migration notice partial/failed:', migration.error || migration.reason);
+          }
+        } catch (migrationErr) {
+          console.error('Customer bot-migration notice warning:', migrationErr.message);
+        }
+      }
+
+      if (needsBotReload) {
+        try {
+          await reloadMultiBots();
+        } catch (reloadErr) {
+          console.error('Multi-bot reload warning after restaurant update:', reloadErr.message);
+        }
+      }
+
+      if (isTokenChanging) {
+        try {
+          await notifyRestaurantTokenChanged({
+            restaurantId: restaurant.id,
+            restaurantName: restaurant.name,
+            oldToken: oldBotToken,
+            newToken: newBotTokenForBg
+          });
+        } catch (notifyErr) {
+          console.error('Restaurant token change notification warning:', notifyErr.message);
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Update restaurant error:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Ошибка обновления ресторана' });
+    }
+  }
+});
+
+router.get('/restaurants/check-availability', async (req, res) => {
+  try {
+    const name = String(req.query?.name || '').trim();
+    const nameValidation = name
+      ? validateRestaurantName(name)
+      : { ok: true, code: 'OK', message: '', normalized: '', invalidChar: '' };
+    const telegramBotToken = String(req.query?.telegram_bot_token || '').trim();
+    const telegramGroupId = String(req.query?.telegram_group_id || '').trim();
+    const excludeRestaurantId = Number.parseInt(req.query?.exclude_id, 10);
+
+    const availability = await checkRestaurantIdentityAvailability({
+      client: pool,
+      name: nameValidation.ok ? nameValidation.normalized : '',
+      telegramBotToken,
+      telegramGroupId,
+      excludeRestaurantId: Number.isFinite(excludeRestaurantId) ? excludeRestaurantId : null
+    });
+
+    return res.json({
+      ok: true,
+      name: {
+        value: nameValidation.normalized || '',
+        available: nameValidation.ok ? !availability.nameTaken : false,
+        conflict_restaurant_id: nameValidation.ok ? (availability.nameConflictRestaurantId || null) : null,
+        validation: {
+          ok: nameValidation.ok,
+          code: nameValidation.code,
+          message: nameValidation.message,
+          invalid_symbol: nameValidation.invalidChar || null
+        }
+      },
+      telegram_bot_token: {
+        value: telegramBotToken,
+        available: !availability.tokenTaken,
+        conflict_restaurant_id: availability.tokenConflictRestaurantId || null
+      },
+      telegram_group_id: {
+        value: telegramGroupId,
+        available: !availability.groupIdTaken,
+        conflict_restaurant_id: availability.groupIdConflictRestaurantId || null
+      }
+    });
+  } catch (error) {
+    console.error('Check restaurant availability error:', error);
+    return res.status(500).json({ error: 'Ошибка проверки доступности' });
+  }
+});
+
+router.get('/restaurants/:id(\\d+)/catalog-copy-tree', async (req, res) => {
+  try {
+    const targetRestaurantId = Number.parseInt(req.params.id, 10);
+    const sourceRestaurantId = Number.parseInt(req.query?.source_restaurant_id, 10);
+    if (!Number.isFinite(targetRestaurantId) || targetRestaurantId <= 0) {
+      return res.status(400).json({ error: 'Некорректный целевой магазин' });
+    }
+    if (!Number.isFinite(sourceRestaurantId) || sourceRestaurantId <= 0) {
+      return res.status(400).json({ error: 'Некорректный магазин-источник' });
+    }
+
+    const sourceRestaurantResult = await pool.query(
+      'SELECT id, name FROM restaurants WHERE id = $1 LIMIT 1',
+      [sourceRestaurantId]
+    );
+    if (!sourceRestaurantResult.rows.length) {
+      return res.status(404).json({ error: 'Магазин-источник не найден' });
+    }
+
+    const productsResult = await pool.query(
+      `SELECT id, category_id, name_ru, name_uz, price, unit, sort_order, in_stock, thumb_url, image_url, product_images
+       FROM products
+       WHERE restaurant_id = $1
+       ORDER BY sort_order, id`,
+      [sourceRestaurantId]
+    );
+    const sourceProductCategoryIds = Array.from(new Set(
+      (productsResult.rows || [])
+        .map((item) => Number.parseInt(item?.category_id, 10))
+        .filter((id) => Number.isFinite(id) && id > 0)
+    ));
+
+    const categoriesResult = await pool.query(
+      `
+      WITH RECURSIVE product_category_tree AS (
+        SELECT c.id, c.parent_id, c.name_ru, c.name_uz, c.sort_order
+        FROM categories c
+        WHERE c.id = ANY($1::int[])
+        UNION
+        SELECT parent.id, parent.parent_id, parent.name_ru, parent.name_uz, parent.sort_order
+        FROM categories parent
+        INNER JOIN product_category_tree pct ON pct.parent_id = parent.id
+      ),
+      source_owned_categories AS (
+        SELECT id, parent_id, name_ru, name_uz, sort_order
+        FROM categories
+        WHERE restaurant_id = $2
+      )
+      SELECT DISTINCT id, parent_id, name_ru, name_uz, sort_order
+      FROM (
+        SELECT * FROM product_category_tree
+        UNION ALL
+        SELECT * FROM source_owned_categories
+      ) merged
+      ORDER BY sort_order, id
+      `,
+      [sourceProductCategoryIds, sourceRestaurantId]
+    );
+
+    return res.json({
+      source_restaurant: sourceRestaurantResult.rows[0],
+      categories: categoriesResult.rows,
+      products: productsResult.rows
+    });
+  } catch (error) {
+    console.error('Get catalog copy tree error:', error);
+    return res.status(500).json({ error: 'Ошибка загрузки структуры каталога' });
+  }
+});
+
+router.post('/restaurants/:id(\\d+)/copy-catalog', async (req, res) => {
+  const startedAt = Date.now();
+  const client = await pool.connect();
+  try {
+    const targetRestaurantId = Number.parseInt(req.params.id, 10);
+    const sourceRestaurantId = Number.parseInt(req.body?.source_restaurant_id, 10);
+    const selectedCategoryIdsRaw = Array.isArray(req.body?.category_ids) ? req.body.category_ids : [];
+    const selectedProductIdsRaw = Array.isArray(req.body?.product_ids) ? req.body.product_ids : [];
+    const includeAllProductsInCategories = req.body?.include_all_products_in_categories !== false;
+
+    if (!Number.isFinite(targetRestaurantId) || targetRestaurantId <= 0) {
+      return res.status(400).json({ error: 'Некорректный целевой магазин' });
+    }
+    if (!Number.isFinite(sourceRestaurantId) || sourceRestaurantId <= 0) {
+      return res.status(400).json({ error: 'Некорректный магазин-источник' });
+    }
+    if (targetRestaurantId === sourceRestaurantId) {
+      return res.status(400).json({ error: 'Источник и получатель не должны совпадать' });
+    }
+
+    const selectedCategoryIds = Array.from(new Set(
+      selectedCategoryIdsRaw.map((value) => Number.parseInt(value, 10)).filter((value) => Number.isFinite(value) && value > 0)
+    ));
+    const selectedProductIds = Array.from(new Set(
+      selectedProductIdsRaw.map((value) => Number.parseInt(value, 10)).filter((value) => Number.isFinite(value) && value > 0)
+    ));
+
+    await client.query('BEGIN');
+
+    const sourceRestaurantResult = await client.query('SELECT id, name FROM restaurants WHERE id = $1 LIMIT 1', [sourceRestaurantId]);
+    const targetRestaurantResult = await client.query('SELECT id, name FROM restaurants WHERE id = $1 LIMIT 1', [targetRestaurantId]);
+    if (!sourceRestaurantResult.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Магазин-источник не найден' });
+    }
+    if (!targetRestaurantResult.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Целевой магазин не найден' });
+    }
+
+    const sourceProductsResult = await client.query(
+      `SELECT id, category_id, name_ru, name_uz, description_ru, description_uz,
+              image_url, thumb_url, product_images, price, unit, order_step, barcode, ikpu, in_stock, sort_order,
+              container_id, container_norm, season_scope, is_hidden_catalog, size_enabled, size_options, printer_id,
+              discount_enabled, discount_price, stock_quantity
+       FROM products
+       WHERE restaurant_id = $1`,
+      [sourceRestaurantId]
+    );
+    const allProducts = sourceProductsResult.rows;
+    const sourceProductCategoryIds = Array.from(new Set(
+      allProducts
+        .map((item) => Number.parseInt(item?.category_id, 10))
+        .filter((id) => Number.isFinite(id) && id > 0)
+    ));
+
+    const sourceCategoriesResult = await client.query(
+      `
+      WITH RECURSIVE product_category_tree AS (
+        SELECT c.id, c.parent_id, c.name_ru, c.name_uz, c.image_url, c.sort_order, c.is_active
+        FROM categories c
+        WHERE c.id = ANY($1::int[])
+        UNION
+        SELECT parent.id, parent.parent_id, parent.name_ru, parent.name_uz, parent.image_url, parent.sort_order, parent.is_active
+        FROM categories parent
+        INNER JOIN product_category_tree pct ON pct.parent_id = parent.id
+      ),
+      source_owned_categories AS (
+        SELECT id, parent_id, name_ru, name_uz, image_url, sort_order, is_active
+        FROM categories
+        WHERE restaurant_id = $2
+      )
+      SELECT DISTINCT id, parent_id, name_ru, name_uz, image_url, sort_order, is_active
+      FROM (
+        SELECT * FROM product_category_tree
+        UNION ALL
+        SELECT * FROM source_owned_categories
+      ) merged
+      `,
+      [sourceProductCategoryIds, sourceRestaurantId]
+    );
+    const sourceCategories = sourceCategoriesResult.rows;
+    const categoryById = new Map(sourceCategories.map((item) => [Number(item.id), item]));
+
+    const noManualSelection = selectedCategoryIds.length === 0 && selectedProductIds.length === 0;
+    const categoryIdsToCopy = new Set(selectedCategoryIds);
+    const productsToCopy = [];
+    for (const product of allProducts) {
+      const productId = Number(product.id);
+      const productCategoryId = Number(product.category_id);
+      const categorySelected = Number.isFinite(productCategoryId) && categoryIdsToCopy.has(productCategoryId);
+      const productSelected = selectedProductIds.includes(productId);
+      const shouldCopy = noManualSelection || productSelected || (includeAllProductsInCategories && categorySelected);
+      if (!shouldCopy) continue;
+      productsToCopy.push(product);
+      if (Number.isFinite(productCategoryId) && productCategoryId > 0) {
+        categoryIdsToCopy.add(productCategoryId);
+      }
+    }
+
+    if (noManualSelection) {
+      sourceCategories.forEach((item) => {
+        const id = Number(item.id);
+        if (Number.isFinite(id) && id > 0) categoryIdsToCopy.add(id);
+      });
+    }
+
+    const ensureParentChain = (categoryId) => {
+      let cursor = Number(categoryId);
+      const guard = new Set();
+      while (Number.isFinite(cursor) && cursor > 0 && !guard.has(cursor)) {
+        guard.add(cursor);
+        const row = categoryById.get(cursor);
+        if (!row) break;
+        categoryIdsToCopy.add(cursor);
+        cursor = Number(row.parent_id || 0);
+      }
+    };
+    for (const id of Array.from(categoryIdsToCopy)) ensureParentChain(id);
+
+    const categoriesToCopy = sourceCategories
+      .filter((item) => categoryIdsToCopy.has(Number(item.id)))
+      .sort((a, b) => {
+        const ap = Number(a.parent_id || 0);
+        const bp = Number(b.parent_id || 0);
+        if (ap === bp) return Number(a.sort_order || 0) - Number(b.sort_order || 0) || Number(a.id) - Number(b.id);
+        if (ap === 0) return -1;
+        if (bp === 0) return 1;
+        return Number(a.id) - Number(b.id);
+      });
+
+    const categoryIdMap = new Map();
+    let categoriesCopied = 0;
+    for (const sourceCategory of categoriesToCopy) {
+      const sourceCategoryId = Number(sourceCategory.id);
+      const sourceParentId = Number(sourceCategory.parent_id || 0);
+      const mappedParentId = sourceParentId > 0 ? (categoryIdMap.get(sourceParentId) || null) : null;
+      const copiedCategoryImageUrl = await copyLocalUploadAssetIfPossible(sourceCategory.image_url);
+      const insertCategoryResult = await client.query(
+        `INSERT INTO categories (restaurant_id, parent_id, name_ru, name_uz, image_url, sort_order, is_active)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id`,
+        [
+          targetRestaurantId,
+          mappedParentId,
+          sourceCategory.name_ru || null,
+          sourceCategory.name_uz || null,
+          copiedCategoryImageUrl || null,
+          Number(sourceCategory.sort_order || 0),
+          sourceCategory.is_active !== false
+        ]
+      );
+      categoryIdMap.set(sourceCategoryId, Number(insertCategoryResult.rows[0].id));
+      categoriesCopied += 1;
+    }
+
+    let productsCopied = 0;
+    let productsFailed = 0;
+    const failures = [];
+    for (const sourceProduct of productsToCopy) {
+      try {
+        const sourceCategoryId = Number(sourceProduct.category_id || 0);
+        const mappedCategoryId = sourceCategoryId > 0 ? (categoryIdMap.get(sourceCategoryId) || null) : null;
+        const copiedMedia = await copyProductImageBundle(sourceProduct);
+        await client.query(
+          `INSERT INTO products (
+             restaurant_id, category_id, name_ru, name_uz, description_ru, description_uz,
+             image_url, thumb_url, product_images, price, unit, order_step, barcode, ikpu, in_stock, sort_order,
+             container_id, container_norm, season_scope, is_hidden_catalog, size_enabled, size_options, printer_id,
+             discount_enabled, discount_price, stock_quantity
+           )
+           VALUES (
+             $1, $2, $3, $4, $5, $6,
+             $7, $8, $9::jsonb, $10, $11, $12, $13, $14, $15, $16,
+             $17, $18, $19, $20, $21, $22::jsonb, $23,
+             $24, $25, $26
+           )`,
+          [
+            targetRestaurantId,
+            mappedCategoryId,
+            sourceProduct.name_ru || null,
+            sourceProduct.name_uz || null,
+            sourceProduct.description_ru || null,
+            sourceProduct.description_uz || null,
+            copiedMedia.image_url || null,
+            copiedMedia.thumb_url || null,
+            JSON.stringify(Array.isArray(copiedMedia.product_images) ? copiedMedia.product_images : []),
+            sourceProduct.price,
+            sourceProduct.unit || 'шт',
+            sourceProduct.order_step || null,
+            sourceProduct.barcode || null,
+            sourceProduct.ikpu || null,
+            sourceProduct.in_stock !== false,
+            Number(sourceProduct.sort_order || 0),
+            sourceProduct.container_id || null,
+            sourceProduct.container_norm || null,
+            sourceProduct.season_scope || 'all',
+            sourceProduct.is_hidden_catalog === true,
+            sourceProduct.size_enabled === true,
+            JSON.stringify(Array.isArray(copiedMedia.size_options) ? copiedMedia.size_options : []),
+            sourceProduct.printer_id || null,
+            sourceProduct.discount_enabled === true,
+            sourceProduct.discount_price || null,
+            sourceProduct.stock_quantity || 0
+          ]
+        );
+        productsCopied += 1;
+      } catch (copyErr) {
+        productsFailed += 1;
+        failures.push({
+          product_id: Number(sourceProduct.id),
+          product_name: sourceProduct.name_ru || sourceProduct.name_uz || `#${sourceProduct.id}`,
+          error: String(copyErr?.message || 'copy_error').slice(0, 300)
+        });
+      }
+    }
+
+    await client.query('COMMIT');
+    const durationMs = Date.now() - startedAt;
+    return res.json({
+      success: true,
+      source_restaurant: sourceRestaurantResult.rows[0],
+      target_restaurant: targetRestaurantResult.rows[0],
+      copied: {
+        categories: categoriesCopied,
+        products: productsCopied
+      },
+      failed: {
+        products: productsFailed,
+        items: failures
+      },
+      duration_ms: durationMs
+    });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Copy catalog error:', error);
+    return res.status(500).json({ error: 'Ошибка копирования каталога' });
+  } finally {
+    client.release();
+  }
+});
+
+// Обновить workflow-статус магазина (для супер-админа)
+router.patch('/restaurants/:id/workflow-status', async (req, res) => {
+  try {
+    await ensureRestaurantWorkflowStatusSchema();
+    const restaurantId = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(restaurantId) || restaurantId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID ресторана' });
+    }
+
+    const workflowStatus = parseRestaurantWorkflowStatus(req.body?.workflow_status);
+    if (!workflowStatus) {
+      return res.status(400).json({ error: 'Некорректный статус магазина' });
+    }
+
+    const oldResult = await pool.query(
+      `SELECT id, name, workflow_status
+       FROM restaurants
+       WHERE id = $1
+       LIMIT 1`,
+      [restaurantId]
+    );
+    if (oldResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Ресторан не найден' });
+    }
+
+    const updateResult = await pool.query(
+      `UPDATE restaurants
+       SET workflow_status = $1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2
+       RETURNING
+         id,
+         name,
+         workflow_status,
+         is_active,
+         created_at,
+         telegram_bot_token,
+         (
+           SELECT MAX(u.last_activity_at)
+           FROM operator_restaurants opr
+           INNER JOIN users u ON u.id = opr.user_id
+           WHERE opr.restaurant_id = restaurants.id
+             AND u.role = 'operator'
+         ) AS latest_operator_activity_at`,
+      [workflowStatus, restaurantId]
+    );
+
+    const updatedRow = updateResult.rows[0];
+    let restaurant = await enrichRestaurantWithBotMeta(updatedRow);
+    restaurant = enrichRestaurantWithWorkflowStatus(restaurant);
+
+    await logActivity({
+      userId: req.user.id,
+      restaurantId,
+      actionType: ACTION_TYPES.UPDATE_RESTAURANT,
+      entityType: ENTITY_TYPES.RESTAURANT,
+      entityId: restaurantId,
+      entityName: restaurant.name,
+      oldValues: {
+        workflow_status: normalizeRestaurantWorkflowStatus(oldResult.rows[0]?.workflow_status, 'new')
+      },
+      newValues: {
+        workflow_status: restaurant.workflow_status_manual,
+        workflow_status_effective: restaurant.workflow_status,
+        workflow_auto_inactive: restaurant.workflow_auto_inactive === true,
+        workflow_auto_inactive_reasons: Array.isArray(restaurant.workflow_auto_inactive_reasons)
+          ? restaurant.workflow_auto_inactive_reasons
+          : []
+      },
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req)
+    });
+
+    return res.json({
+      id: restaurant.id,
+      name: restaurant.name,
+      workflow_status: restaurant.workflow_status,
+      workflow_status_manual: restaurant.workflow_status_manual,
+      workflow_auto_inactive: restaurant.workflow_auto_inactive === true,
+      workflow_auto_inactive_reasons: Array.isArray(restaurant.workflow_auto_inactive_reasons)
+        ? restaurant.workflow_auto_inactive_reasons
+        : []
+    });
+  } catch (error) {
+    console.error('Update restaurant workflow status error:', error);
+    return res.status(500).json({ error: 'Ошибка обновления статуса магазина' });
+  }
+});
+
+// Обновить внутренний комментарий магазина (для супер-админа)
+router.put('/restaurants/:id/admin-comment', async (req, res) => {
+  try {
+    await ensureRestaurantAdminCommentSchema();
+    const restaurantId = parseInt(req.params.id, 10);
+    if (!Number.isFinite(restaurantId) || restaurantId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID ресторана' });
+    }
+
+    const oldResult = await pool.query(
+      'SELECT id, name, admin_comment, admin_comment_checklist FROM restaurants WHERE id = $1 LIMIT 1',
+      [restaurantId]
+    );
+    if (oldResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Ресторан не найден' });
+    }
+
+    const adminComment = normalizeRestaurantAdminComment(req.body?.admin_comment);
+    const adminChecklist = normalizeRestaurantAdminChecklist(req.body?.admin_comment_checklist);
+    const updateResult = await pool.query(
+      `UPDATE restaurants
+       SET admin_comment = $1,
+           admin_comment_checklist = $2::jsonb,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3
+       RETURNING id, name, admin_comment, admin_comment_checklist`,
+      [adminComment, JSON.stringify(adminChecklist), restaurantId]
+    );
+
+    const updatedRow = updateResult.rows[0];
+    await logActivity({
+      userId: req.user.id,
+      restaurantId,
+      actionType: ACTION_TYPES.UPDATE_RESTAURANT,
+      entityType: ENTITY_TYPES.RESTAURANT,
+      entityId: restaurantId,
+      entityName: updatedRow.name,
+      oldValues: {
+        admin_comment: oldResult.rows[0].admin_comment || null,
+        admin_comment_checklist: Array.isArray(oldResult.rows[0].admin_comment_checklist) ? oldResult.rows[0].admin_comment_checklist : []
+      },
+      newValues: {
+        admin_comment: updatedRow.admin_comment || null,
+        admin_comment_checklist: Array.isArray(updatedRow.admin_comment_checklist) ? updatedRow.admin_comment_checklist : []
+      },
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req)
+    });
+
+    res.json(updatedRow);
+  } catch (error) {
+    console.error('Update restaurant admin comment error:', error);
+    res.status(500).json({ error: 'Ошибка сохранения комментария' });
+  }
+});
+
+// Получить шаблоны сообщений ресторана
+router.get('/restaurants/:id/messages', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, name, msg_new, msg_preparing, msg_delivering, msg_delivered, msg_cancelled 
+       FROM restaurants WHERE id = $1`,
+      [req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Ресторан не найден' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Get restaurant messages error:', error);
+    res.status(500).json({ error: 'Ошибка получения шаблонов' });
+  }
+});
+
+// Обновить шаблоны сообщений ресторана
+router.put('/restaurants/:id/messages', async (req, res) => {
+  try {
+    const { msg_new, msg_preparing, msg_delivering, msg_delivered, msg_cancelled } = req.body;
+
+    const result = await pool.query(`
+      UPDATE restaurants 
+      SET msg_new = $1,
+          msg_preparing = $2,
+          msg_delivering = $3,
+          msg_delivered = $4,
+          msg_cancelled = $5,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $6
+      RETURNING id, name, msg_new, msg_preparing, msg_delivering, msg_delivered, msg_cancelled
+    `, [
+      msg_new || null,
+      msg_preparing || null,
+      msg_delivering || null,
+      msg_delivered || null,
+      msg_cancelled || null,
+      req.params.id
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Ресторан не найден' });
+    }
+
+    // Log activity
+    await logActivity({
+      userId: req.user.id,
+      restaurantId: parseInt(req.params.id),
+      actionType: ACTION_TYPES.UPDATE_RESTAURANT,
+      entityType: ENTITY_TYPES.RESTAURANT,
+      entityId: parseInt(req.params.id),
+      entityName: result.rows[0].name,
+      newValues: { msg_new, msg_preparing, msg_delivering, msg_delivered, msg_cancelled },
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req)
+    });
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Update restaurant messages error:', error);
+    res.status(500).json({ error: 'Ошибка обновления шаблонов' });
+  }
+});
+
+// Удалить ресторан
+router.delete('/restaurants/:id', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Get restaurant for logging
+    const restaurantResult = await client.query('SELECT * FROM restaurants WHERE id = $1', [req.params.id]);
+    if (restaurantResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Ресторан не найден' });
+    }
+    const restaurant = restaurantResult.rows[0];
+
+    // Check if there are orders
+    const ordersCheck = await client.query('SELECT COUNT(*) FROM orders WHERE restaurant_id = $1', [req.params.id]);
+    if (parseInt(ordersCheck.rows[0].count) > 0) {
+      // Soft delete - just deactivate
+      await client.query('UPDATE restaurants SET is_active = false WHERE id = $1', [req.params.id]);
+      await client.query('COMMIT');
+
+      await logActivity({
+        userId: req.user.id,
+        restaurantId: restaurant.id,
+        actionType: ACTION_TYPES.DELETE_RESTAURANT,
+        entityType: ENTITY_TYPES.RESTAURANT,
+        entityId: restaurant.id,
+        entityName: restaurant.name,
+        oldValues: restaurant,
+        newValues: { is_active: false },
+        ipAddress: getIpFromRequest(req),
+        userAgent: getUserAgentFromRequest(req)
+      });
+
+      try {
+        await reloadMultiBots();
+      } catch (reloadErr) {
+        console.error('Multi-bot reload warning after restaurant deactivate:', reloadErr.message);
+      }
+
+      return res.json({ message: 'Ресторан деактивирован (есть связанные заказы)' });
+    }
+
+    // Hard delete if no orders
+    await client.query('DELETE FROM restaurants WHERE id = $1', [req.params.id]);
+    await client.query('COMMIT');
+
+    await logActivity({
+      userId: req.user.id,
+      actionType: ACTION_TYPES.DELETE_RESTAURANT,
+      entityType: ENTITY_TYPES.RESTAURANT,
+      entityId: restaurant.id,
+      entityName: restaurant.name,
+      oldValues: restaurant,
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req)
+    });
+
+    try {
+      await reloadMultiBots();
+    } catch (reloadErr) {
+      console.error('Multi-bot reload warning after restaurant delete:', reloadErr.message);
+    }
+
+    res.json({ message: 'Ресторан удален' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Delete restaurant error:', error);
+    res.status(500).json({ error: 'Ошибка удаления ресторана' });
+  } finally {
+    client.release();
+  }
+});
+
+// Полностью удалить ресторан из БД (только с паролем учредителей)
+router.delete('/restaurants/:id/permanent', async (req, res) => {
+  const restaurantId = Number.parseInt(req.params.id, 10);
+  if (!Number.isFinite(restaurantId) || restaurantId <= 0) {
+    return res.status(400).json({ error: 'Некорректный ID магазина' });
+  }
+  if (!ensureFoundersAccessByPassword(req, res)) return;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const restaurantResult = await client.query(
+      'SELECT * FROM restaurants WHERE id = $1 FOR UPDATE',
+      [restaurantId]
+    );
+    if (restaurantResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Ресторан не найден' });
+    }
+    const restaurant = restaurantResult.rows[0];
+
+    const ordersResult = await client.query(
+      'SELECT COUNT(*)::int AS count FROM orders WHERE restaurant_id = $1',
+      [restaurantId]
+    );
+    const ordersCount = Number(ordersResult.rows?.[0]?.count || 0);
+
+    await client.query('DELETE FROM restaurants WHERE id = $1', [restaurantId]);
+    await client.query('COMMIT');
+
+    await logActivity({
+      userId: req.user.id,
+      actionType: ACTION_TYPES.DELETE_RESTAURANT,
+      entityType: ENTITY_TYPES.RESTAURANT,
+      entityId: restaurant.id,
+      entityName: restaurant.name,
+      oldValues: restaurant,
+      details: `Permanent delete from DB (founders password), linked orders: ${ordersCount}`,
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req)
+    });
+
+    try {
+      await reloadMultiBots();
+    } catch (reloadErr) {
+      console.error('Multi-bot reload warning after permanent restaurant delete:', reloadErr.message);
+    }
+
+    return res.json({
+      message: 'Магазин полностью удален из базы данных',
+      deleted: true,
+      restaurant_id: restaurantId
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Permanent delete restaurant error:', error);
+    return res.status(500).json({ error: 'Ошибка полного удаления магазина' });
+  } finally {
+    client.release();
+  }
+});
+
+// =====================================================
+// ОПЕРАТОРЫ
+// =====================================================
+
+// Получить всех операторов
+router.get('/operators', async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.max(parseInt(req.query.limit, 10) || 50, 1);
+    const offset = (page - 1) * limit;
+    const { role = '', status = '', search = '', restaurant_id = '' } = req.query;
+
+    const whereClauses = [`u.role IN ('operator', 'moderator', 'superadmin')`];
+    const params = [];
+
+    if (role === 'operator' || role === 'moderator' || role === 'superadmin') {
+      params.push(role);
+      whereClauses.push(`u.role = $${params.length}`);
+    }
+
+    if (status === 'active') {
+      whereClauses.push('u.is_active = true');
+    } else if (status === 'inactive') {
+      whereClauses.push('u.is_active = false');
+    }
+
+    if (restaurant_id) {
+      params.push(restaurant_id);
+      whereClauses.push(`EXISTS (
+        SELECT 1 FROM operator_restaurants opr_filter
+        WHERE opr_filter.user_id = u.id AND opr_filter.restaurant_id = $${params.length}
+      )`);
+    }
+
+    if (search) {
+      params.push(`%${search}%`);
+      whereClauses.push(`(
+        u.full_name ILIKE $${params.length}
+        OR u.phone ILIKE $${params.length}
+        OR u.username ILIKE $${params.length}
+      )`);
+    }
+
+    const whereSql = whereClauses.length ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+    const result = await pool.query(`
+      SELECT 
+        u.id, u.username, u.full_name, u.phone, u.role, u.is_active, u.created_at,
+        u.moderator_permissions,
+        u.active_restaurant_id, u.telegram_id,
+        u.last_activity_at,
+        u.last_ip_address,
+        u.last_user_agent,
+        u.last_device_type,
+        u.last_browser_name,
+        u.last_browser_version,
+        u.last_os_name,
+        u.last_os_version,
+        u.last_country,
+        u.last_region,
+        u.last_city,
+        ar.name as active_restaurant_name,
+        COALESCE(
+          json_agg(
+            json_build_object('id', r.id, 'name', r.name)
+          ) FILTER (WHERE r.id IS NOT NULL),
+          '[]'
+        ) as restaurants
+      FROM users u
+      LEFT JOIN restaurants ar ON u.active_restaurant_id = ar.id
+      LEFT JOIN operator_restaurants opr ON u.id = opr.user_id
+      LEFT JOIN restaurants r ON opr.restaurant_id = r.id
+      ${whereSql}
+      GROUP BY u.id, ar.name
+      ORDER BY u.created_at DESC
+      LIMIT $${params.length + 1}
+      OFFSET $${params.length + 2}
+    `, [...params, limit, offset]);
+
+    const rows = Array.isArray(result.rows) ? result.rows : [];
+    const missingTelemetryUserIds = rows
+      .filter((row) => (
+        !row?.last_activity_at
+        || !row?.last_ip_address
+        || !row?.last_user_agent
+        || !row?.last_device_type
+        || !row?.last_browser_name
+        || !row?.last_os_name
+      ))
+      .map((row) => Number(row.id))
+      .filter((id) => Number.isFinite(id) && id > 0);
+
+    let mergedRows = rows;
+    if (missingTelemetryUserIds.length > 0) {
+      await refreshUserTelemetryFromActivityLogs({ userIds: missingTelemetryUserIds }).catch(() => {});
+      const refreshedTelemetryResult = await pool.query(
+        `SELECT
+           id,
+           last_activity_at,
+           last_ip_address,
+           last_user_agent,
+           last_device_type,
+           last_browser_name,
+           last_browser_version,
+           last_os_name,
+           last_os_version,
+           last_country,
+           last_region,
+           last_city
+         FROM users
+         WHERE id = ANY($1::int[])`,
+        [missingTelemetryUserIds]
+      );
+      const telemetryMap = new Map(
+        (refreshedTelemetryResult.rows || []).map((item) => [Number(item.id), item])
+      );
+
+      mergedRows = rows.map((row) => {
+        const telemetry = telemetryMap.get(Number(row.id));
+        if (!telemetry) return row;
+        return { ...row, ...telemetry };
+      });
+    }
+
+    const countResult = await pool.query(`
+      SELECT COUNT(*) as total
+      FROM users u
+      ${whereSql}
+    `, params);
+
+    res.json({
+      operators: mergedRows.map(normalizeUserIdentityForDisplay),
+      total: parseInt(countResult.rows[0].total, 10),
+      page,
+      limit
+    });
+  } catch (error) {
+    console.error('Get operators error:', error);
+    res.status(500).json({ error: 'Ошибка получения операторов' });
+  }
+});
+
+// =====================================================
+// ГЛОБАЛЬНЫЕ ТОВАРЫ (шаблоны для магазинов)
+// =====================================================
+
+router.post('/global-products/description-preview', async (req, res) => {
+  try {
+    if (!(await ensureAiFeatureEnabled(res))) return;
+    const nameRu = toOptionalTrimmedText(req.body?.name_ru).slice(0, 255);
+    const nameUz = toOptionalTrimmedText(req.body?.name_uz).slice(0, 255);
+    const variantNames = Array.isArray(req.body?.variants)
+      ? req.body.variants
+        .map((variant) => {
+          if (typeof variant === 'string') return toOptionalTrimmedText(variant).slice(0, 120);
+          return toOptionalTrimmedText(variant?.name || variant?.variant_name || variant?.title).slice(0, 120);
+        })
+        .filter(Boolean)
+      : [];
+
+    if (!nameRu && !nameUz) {
+      return res.status(400).json({
+        error: 'Укажите название товара хотя бы на одном языке (RU или UZ)'
+      });
+    }
+
+    const generated = await generateGlobalProductLocalizedText({ nameRu, nameUz, variants: variantNames });
+    const parsedProvider = parseProviderTag(generated.provider || '');
+    const providerRef = generated.providerRef || (parsedProvider.type
+      ? { id: null, name: parsedProvider.type, provider_type: parsedProvider.type }
+      : null);
+    const usageModel = normalizeAiProviderModel(generated.model || parsedProvider.model || '');
+    await logAiUsageEvent({
+      providerRef,
+      operation: 'text_generate',
+      model: usageModel,
+      status: 'success',
+      estimatedCostUsd: resolveAiUsageCostUsd(generated.estimatedCostUsd),
+      meta: { endpoint: 'global-products/description-preview' }
+    });
+    res.json({
+      name_ru: generated.name_ru || nameRu || nameUz,
+      name_uz: generated.name_uz || nameUz || nameRu,
+      description_ru: generated.description_ru || '',
+      description_uz: generated.description_uz || '',
+      variant_descriptions: Array.isArray(generated?.variant_descriptions)
+        ? generated.variant_descriptions
+          .map((variant) => ({
+            name: toOptionalTrimmedText(variant?.name).slice(0, 120),
+            description_ru: toOptionalTrimmedText(variant?.description_ru).slice(0, 1500),
+            description_uz: toOptionalTrimmedText(variant?.description_uz).slice(0, 1500)
+          }))
+          .filter((variant) => variant.name)
+        : [],
+      provider: generated.provider || 'local-template'
+    });
+  } catch (error) {
+    console.error('Global product description preview error:', error);
+    await logAiUsageEvent({
+      providerRef: null,
+      operation: 'text_generate',
+      status: 'failed',
+      httpStatus: Number(error?.response?.status || 0) || null,
+      errorCode: String(error?.response?.data?.error?.status || '').trim(),
+      errorMessage: String(error?.message || '').trim(),
+      meta: { endpoint: 'global-products/description-preview' }
+    });
+    const rawMessage = String(error?.message || '').trim();
+    const lowMessage = rawMessage.toLowerCase();
+    const statusCode = lowMessage.includes('укажите') ? 400 : 500;
+    res.status(statusCode).json({
+      error: statusCode === 400
+        ? (rawMessage || 'Укажите название товара')
+        : 'Не удалось сгенерировать описание товара'
+    });
+  }
+});
+
+router.post('/global-products/image-preview', async (req, res) => {
+  let usageOperation = 'image_generate';
+  try {
+    if (!(await ensureAiFeatureEnabled(res))) return;
+    const modeRaw = String(req.body?.mode || '').trim().toLowerCase();
+    const requestedMode = ['generate', 'process'].includes(modeRaw) ? modeRaw : 'auto';
+    const productName = toOptionalTrimmedText(req.body?.name || req.body?.name_ru || req.body?.name_uz).slice(0, 180);
+    const recommendedCategoryId = normalizeCategoryId(req.body?.recommended_category_id);
+    const sourceImageUrl = toOptionalTrimmedText(req.body?.image_url);
+    const effectiveMode = requestedMode === 'auto'
+      ? (sourceImageUrl ? 'process' : 'generate')
+      : requestedMode;
+    usageOperation = effectiveMode === 'process' ? 'image_process' : 'image_generate';
+
+    let sourceBuffer;
+    let provider = 'source_upload';
+    let providerRef = null;
+    let resolvedModel = '';
+    let estimatedCostUsd = null;
+
+    if (effectiveMode === 'process') {
+      const resolvedSourceUrl = resolveGlobalProductAiImageSourceUrl(sourceImageUrl, req);
+      if (!resolvedSourceUrl) {
+        return res.status(400).json({
+          error: 'Для обработки сначала выберите фото товара (доступны только /uploads или доверенные http/https ссылки)'
+        });
+      }
+      sourceBuffer = await downloadGlobalProductAiSourceImage(resolvedSourceUrl);
+    } else {
+      if (!productName) {
+        return res.status(400).json({ error: 'Укажите название товара для генерации изображения' });
+      }
+      let categoryContextPath = [];
+      if (recommendedCategoryId) {
+        const chain = await getCategoryChainFromLeaf(pool, recommendedCategoryId);
+        categoryContextPath = buildAiCategoryContextPath({ chainRows: chain });
+      }
+      const generated = await generateGlobalProductImageByName(productName, { categoryContextPath });
+      sourceBuffer = generated.buffer;
+      provider = generated.provider || 'generator';
+      providerRef = generated.providerRef || null;
+      resolvedModel = String(generated.model || '').trim();
+      estimatedCostUsd = resolveAiUsageCostUsd(generated.estimatedCostUsd);
+    }
+
+    const previewBuffer = await prepareGlobalProductTransparentPreview(sourceBuffer);
+    const previewUrl = await saveGlobalProductAiImage(previewBuffer);
+    const parsedProvider = parseProviderTag(provider);
+    const effectiveProviderRef = providerRef || (parsedProvider.type
+      ? { id: null, name: parsedProvider.type, provider_type: parsedProvider.type }
+      : null);
+    const usageModel = resolvedModel || parsedProvider.model || '';
+    const usageCostUsd = resolveAiUsageCostUsd(
+      estimatedCostUsd,
+      parsedProvider.type === 'gemini' ? estimateGeminiImageCostUsd(usageModel) : null
+    );
+    await logAiUsageEvent({
+      providerRef: effectiveProviderRef,
+      operation: usageOperation,
+      model: usageModel,
+      status: 'success',
+      estimatedCostUsd: usageCostUsd,
+      meta: { endpoint: 'global-products/image-preview', mode: effectiveMode }
+    });
+
+    res.json({
+      preview_url: previewUrl,
+      provider,
+      mode: effectiveMode
+    });
+  } catch (error) {
+    console.error('Global product image preview error:', error);
+    await logAiUsageEvent({
+      providerRef: null,
+      operation: usageOperation,
+      status: 'failed',
+      httpStatus: Number(error?.response?.status || 0) || null,
+      errorCode: String(error?.response?.data?.error?.status || '').trim(),
+      errorMessage: String(error?.message || '').trim(),
+      meta: { endpoint: 'global-products/image-preview' }
+    });
+    const rawMessage = String(error?.message || '').trim();
+    const lowMessage = rawMessage.toLowerCase();
+    const isInputError = lowMessage.includes('укажите название')
+      || lowMessage.includes('выберите фото')
+      || lowMessage.includes('источник')
+      || lowMessage.includes('некоррект');
+    const isUpstreamError = Boolean(error?.isAxiosError)
+      || lowMessage.includes('timeout')
+      || lowMessage.includes('fetch failed')
+      || lowMessage.includes('pollinations')
+      || lowMessage.includes('openai')
+      || lowMessage.includes('gemini');
+    const statusCode = isInputError ? 400 : (isUpstreamError ? 502 : 500);
+    const baseErrorText = statusCode === 502
+      ? 'Внешний AI-сервис сейчас недоступен. Попробуйте еще раз или используйте обработку выбранного фото.'
+      : 'Не удалось подготовить preview изображения';
+    const details = rawMessage ? rawMessage.slice(0, 220) : undefined;
+
+    res.status(statusCode).json({
+      error: baseErrorText,
+      ...(details ? { details } : {})
+    });
+  }
+});
+
+router.post('/categories/image-preview', async (req, res) => {
+  let usageOperation = 'image_generate';
+  try {
+    if (!(await ensureAiFeatureEnabled(res))) return;
+    const modeRaw = String(req.body?.mode || '').trim().toLowerCase();
+    const requestedMode = ['generate', 'process'].includes(modeRaw) ? modeRaw : 'auto';
+    const categoryName = toOptionalTrimmedText(req.body?.name || req.body?.name_ru || req.body?.name_uz).slice(0, 180);
+    const categoryId = normalizeCategoryId(req.body?.category_id);
+    const parentCategoryId = normalizeCategoryId(req.body?.parent_id);
+    const sourceImageUrl = toOptionalTrimmedText(req.body?.image_url);
+    const effectiveMode = requestedMode === 'auto'
+      ? (sourceImageUrl ? 'process' : 'generate')
+      : requestedMode;
+    usageOperation = effectiveMode === 'process' ? 'image_process' : 'image_generate';
+
+    let sourceBuffer;
+    let provider = 'source_upload';
+    let providerRef = null;
+    let resolvedModel = '';
+    let estimatedCostUsd = null;
+
+    if (effectiveMode === 'process') {
+      const resolvedSourceUrl = resolveGlobalProductAiImageSourceUrl(sourceImageUrl, req);
+      if (!resolvedSourceUrl) {
+        return res.status(400).json({
+          error: 'Для обработки сначала выберите фото категории (доступны только /uploads или доверенные http/https ссылки)'
+        });
+      }
+      sourceBuffer = await downloadGlobalProductAiSourceImage(resolvedSourceUrl);
+    } else {
+      if (!categoryName) {
+        return res.status(400).json({ error: 'Укажите название категории для генерации изображения' });
+      }
+      let categoryContextPath = [];
+      if (categoryId) {
+        const chain = await getCategoryChainFromLeaf(pool, categoryId);
+        categoryContextPath = buildAiCategoryContextPath({ chainRows: chain });
+        if (categoryContextPath.length) {
+          categoryContextPath[categoryContextPath.length - 1] = normalizeCategoryName(categoryName).slice(0, 84) || categoryContextPath[categoryContextPath.length - 1];
+        } else {
+          categoryContextPath = buildAiCategoryContextPath({ leafName: categoryName });
+        }
+      } else if (parentCategoryId) {
+        const parentChain = await getCategoryChainFromLeaf(pool, parentCategoryId);
+        categoryContextPath = buildAiCategoryContextPath({ chainRows: parentChain, leafName: categoryName });
+      } else {
+        categoryContextPath = buildAiCategoryContextPath({ leafName: categoryName });
+      }
+
+      const generated = await generateGlobalProductImageByName(categoryName, { categoryContextPath });
+      sourceBuffer = generated.buffer;
+      provider = generated.provider || 'generator';
+      providerRef = generated.providerRef || null;
+      resolvedModel = String(generated.model || '').trim();
+      estimatedCostUsd = resolveAiUsageCostUsd(generated.estimatedCostUsd);
+    }
+
+    const previewBuffer = await prepareGlobalProductTransparentPreview(sourceBuffer);
+    const previewUrl = await saveGlobalProductAiImage(previewBuffer);
+    const parsedProvider = parseProviderTag(provider);
+    const effectiveProviderRef = providerRef || (parsedProvider.type
+      ? { id: null, name: parsedProvider.type, provider_type: parsedProvider.type }
+      : null);
+    const usageModel = resolvedModel || parsedProvider.model || '';
+    const usageCostUsd = resolveAiUsageCostUsd(
+      estimatedCostUsd,
+      parsedProvider.type === 'gemini' ? estimateGeminiImageCostUsd(usageModel) : null
+    );
+    await logAiUsageEvent({
+      providerRef: effectiveProviderRef,
+      operation: usageOperation,
+      model: usageModel,
+      status: 'success',
+      estimatedCostUsd: usageCostUsd,
+      meta: { endpoint: 'categories/image-preview', mode: effectiveMode }
+    });
+
+    res.json({
+      preview_url: previewUrl,
+      provider,
+      mode: effectiveMode
+    });
+  } catch (error) {
+    console.error('Category image preview error:', error);
+    await logAiUsageEvent({
+      providerRef: null,
+      operation: usageOperation,
+      status: 'failed',
+      httpStatus: Number(error?.response?.status || 0) || null,
+      errorCode: String(error?.response?.data?.error?.status || '').trim(),
+      errorMessage: String(error?.message || '').trim(),
+      meta: { endpoint: 'categories/image-preview' }
+    });
+    const rawMessage = String(error?.message || '').trim();
+    const lowMessage = rawMessage.toLowerCase();
+    const isInputError = lowMessage.includes('укажите название')
+      || lowMessage.includes('выберите фото')
+      || lowMessage.includes('источник')
+      || lowMessage.includes('некоррект');
+    const isUpstreamError = Boolean(error?.isAxiosError)
+      || lowMessage.includes('timeout')
+      || lowMessage.includes('fetch failed')
+      || lowMessage.includes('pollinations')
+      || lowMessage.includes('openai')
+      || lowMessage.includes('gemini');
+    const statusCode = isInputError ? 400 : (isUpstreamError ? 502 : 500);
+    const baseErrorText = statusCode === 502
+      ? 'Внешний AI-сервис сейчас недоступен. Попробуйте еще раз или используйте обработку выбранного фото.'
+      : 'Не удалось подготовить preview изображения категории';
+    const details = rawMessage ? rawMessage.slice(0, 220) : undefined;
+
+    res.status(statusCode).json({
+      error: baseErrorText,
+      ...(details ? { details } : {})
+    });
+  }
+});
+
+router.get('/global-products', async (req, res) => {
+  try {
+    await ensureGlobalProductsSchema();
+    const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+    const limit = Math.max(1, Math.min(100, Number.parseInt(req.query.limit, 10) || 20));
+    const offset = (page - 1) * limit;
+    const search = String(req.query.search || '').trim();
+    const barcode = String(req.query.barcode || '').replace(/\D/g, '').slice(0, 120);
+    const includeInactive = ['1', 'true', 'yes'].includes(String(req.query.include_inactive || '').toLowerCase());
+    const categoryLevel1Id = Number.parseInt(req.query.category_level1_id, 10);
+    const categoryLevel2Id = Number.parseInt(req.query.category_level2_id, 10);
+    const categoryLevel3Id = Number.parseInt(req.query.category_level3_id, 10);
+    const effectiveCategoryId = Number.isInteger(categoryLevel3Id) && categoryLevel3Id > 0
+      ? categoryLevel3Id
+      : (Number.isInteger(categoryLevel2Id) && categoryLevel2Id > 0
+        ? categoryLevel2Id
+        : (Number.isInteger(categoryLevel1Id) && categoryLevel1Id > 0 ? categoryLevel1Id : null));
+
+    const where = [];
+    const params = [];
+
+    if (!includeInactive) {
+      where.push('gp.is_active = true');
+    }
+    if (search) {
+      params.push(`%${search}%`);
+      where.push(`(gp.name_ru ILIKE $${params.length} OR gp.name_uz ILIKE $${params.length})`);
+    }
+    if (barcode) {
+      params.push(`%${barcode}%`);
+      where.push(`REGEXP_REPLACE(COALESCE(gp.barcode, ''), '\\D', '', 'g') LIKE $${params.length}`);
+    }
+    if (effectiveCategoryId) {
+      params.push(effectiveCategoryId);
+      where.push(`
+        gp.recommended_category_id IN (
+          WITH RECURSIVE category_descendants AS (
+            SELECT id
+            FROM categories
+            WHERE id = $${params.length}
+            UNION ALL
+            SELECT c.id
+            FROM categories c
+            INNER JOIN category_descendants cd ON cd.id = c.parent_id
+          )
+          SELECT id FROM category_descendants
+        )
+      `);
+    }
+
+    const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const rowsResult = await pool.query(
+      `
+        SELECT
+          gp.*,
+          c.name_ru AS recommended_category_name_ru,
+          c.name_uz AS recommended_category_name_uz
+        FROM global_products gp
+        LEFT JOIN categories c ON c.id = gp.recommended_category_id
+        ${whereSql}
+        ORDER BY gp.updated_at DESC, gp.id DESC
+        LIMIT $${params.length + 1}
+        OFFSET $${params.length + 2}
+      `,
+      [...params, limit, offset]
+    );
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM global_products gp ${whereSql}`,
+      params
+    );
+
+    res.json({
+      items: rowsResult.rows || [],
+      total: Number(countResult.rows?.[0]?.total || 0),
+      page,
+      limit
+    });
+  } catch (error) {
+    console.error('Get global products error:', error);
+    res.status(500).json({ error: 'Ошибка получения глобальных товаров' });
+  }
+});
+
+router.post('/global-products/match-names', async (req, res) => {
+  try {
+    await ensureGlobalProductsSchema();
+    const requestedNames = Array.isArray(req.body?.names) ? req.body.names : [];
+    const normalizedNames = [...new Set(
+      requestedNames
+        .map((name) => normalizeGlobalProductNameKey(name))
+        .filter(Boolean)
+    )].slice(0, 1200);
+
+    if (!normalizedNames.length) {
+      return res.json({ matches: {} });
+    }
+
+    const result = await pool.query(
+      `
+        WITH requested(name_key) AS (
+          SELECT UNNEST($1::text[])
+        )
+        SELECT
+          r.name_key,
+          gp.id,
+          gp.name_ru,
+          gp.name_uz,
+          gp.barcode,
+          gp.ikpu,
+          gp.is_active,
+          gp.updated_at,
+          c.name_ru AS recommended_category_name_ru,
+          c.name_uz AS recommended_category_name_uz
+        FROM requested r
+        INNER JOIN global_products gp
+          ON LOWER(REGEXP_REPLACE(BTRIM(COALESCE(gp.name_ru, '')), '\\s+', ' ', 'g')) = r.name_key
+        LEFT JOIN categories c ON c.id = gp.recommended_category_id
+        ORDER BY r.name_key ASC, gp.updated_at DESC, gp.id DESC
+      `,
+      [normalizedNames]
+    );
+
+    const matches = {};
+    for (const row of result.rows || []) {
+      const key = String(row?.name_key || '').trim();
+      if (!key) continue;
+      if (!Array.isArray(matches[key])) matches[key] = [];
+      if (matches[key].length >= 20) continue;
+      matches[key].push({
+        id: Number(row.id),
+        name_ru: row.name_ru || '',
+        name_uz: row.name_uz || '',
+        barcode: row.barcode || '',
+        ikpu: row.ikpu || '',
+        is_active: row.is_active !== false,
+        updated_at: row.updated_at || null,
+        recommended_category_name_ru: row.recommended_category_name_ru || '',
+        recommended_category_name_uz: row.recommended_category_name_uz || ''
+      });
+    }
+
+    res.json({ matches });
+  } catch (error) {
+    console.error('Match global products by names error:', error);
+    res.status(500).json({ error: 'Ошибка поиска дублей глобальных товаров' });
+  }
+});
+
+router.post('/global-products', async (req, res) => {
+  try {
+    await ensureGlobalProductsSchema();
+    const nameRu = toOptionalTrimmedText(req.body?.name_ru).slice(0, 255);
+    if (!nameRu) {
+      return res.status(400).json({ error: 'Название (RU) обязательно' });
+    }
+
+    const nameUz = toOptionalTrimmedText(req.body?.name_uz).slice(0, 255);
+    const descriptionRu = toOptionalTrimmedText(req.body?.description_ru).slice(0, 3000);
+    const descriptionUz = toOptionalTrimmedText(req.body?.description_uz).slice(0, 3000);
+    const barcode = toOptionalTrimmedText(req.body?.barcode).slice(0, 120);
+    const ikpu = toOptionalTrimmedText(req.body?.ikpu).slice(0, 64);
+    const recommendedCategoryIdRaw = Number.parseInt(req.body?.recommended_category_id, 10);
+    const recommendedCategoryId = Number.isFinite(recommendedCategoryIdRaw) && recommendedCategoryIdRaw > 0
+      ? recommendedCategoryIdRaw
+      : null;
+    const unit = toOptionalTrimmedText(req.body?.unit).slice(0, 32) || 'шт';
+    const normalizedOrderStep = Number.parseFloat(String(req.body?.order_step ?? '').replace(',', '.'));
+    const orderStep = Number.isFinite(normalizedOrderStep) && normalizedOrderStep > 0
+      ? Math.round((normalizedOrderStep + Number.EPSILON) * 100) / 100
+      : null;
+    const sizeEnabled = req.body?.size_enabled === true || req.body?.size_enabled === 'true';
+    const sizeOptions = normalizeGlobalProductVariantOptions(req.body?.size_options);
+    const normalizedImages = normalizeGlobalProductImages(req.body?.product_images, GLOBAL_PRODUCT_MAX_IMAGES);
+    const fallbackImageUrl = toOptionalTrimmedText(req.body?.image_url);
+    const fallbackThumbUrl = toOptionalTrimmedText(req.body?.thumb_url);
+    if (normalizedImages.length === 0 && fallbackImageUrl) {
+      normalizedImages.push({
+        url: fallbackImageUrl,
+        ...(fallbackThumbUrl ? { thumb_url: fallbackThumbUrl } : {})
+      });
+    }
+    const mainImage = normalizedImages[0] || null;
+    const imageUrl = mainImage?.url || fallbackImageUrl || null;
+    const thumbUrl = mainImage?.thumb_url || fallbackThumbUrl || null;
+
+    if (recommendedCategoryId) {
+      const categoryExistsResult = await pool.query('SELECT id FROM categories WHERE id = $1 LIMIT 1', [recommendedCategoryId]);
+      if (!categoryExistsResult.rows.length) {
+        return res.status(400).json({ error: 'Рекомендуемая категория не найдена' });
+      }
+    }
+    const duplicateBarcodeProduct = await findGlobalProductByBarcode(barcode);
+    if (duplicateBarcodeProduct) {
+      return res.status(409).json({
+        error: `Штрихкод уже используется (товар #${duplicateBarcodeProduct.id}: ${duplicateBarcodeProduct.name_ru || 'без названия'})`
+      });
+    }
+
+    const result = await pool.query(
+      `
+        INSERT INTO global_products (
+          name_ru, name_uz, description_ru, description_uz,
+          image_url, thumb_url, product_images, barcode, ikpu,
+          recommended_category_id, unit, order_step,
+          size_enabled, size_options, is_active,
+          created_by, updated_by
+        ) VALUES (
+          $1, $2, $3, $4,
+          $5, $6, $7::jsonb, $8, $9,
+          $10, $11, $12,
+          $13, $14::jsonb, true,
+          $15, $15
+        )
+        RETURNING *
+      `,
+      [
+        nameRu, nameUz || null, descriptionRu || null, descriptionUz || null,
+        imageUrl, thumbUrl, JSON.stringify(normalizedImages), barcode || null, ikpu || null,
+        recommendedCategoryId, unit, orderStep,
+        sizeEnabled, JSON.stringify(sizeOptions), req.user.id
+      ]
+    );
+
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    if (error?.code === '23505' && String(error?.constraint || '').includes('uq_global_products_barcode_normalized')) {
+      return res.status(409).json({ error: 'Штрихкод уже используется другим глобальным товаром' });
+    }
+    console.error('Create global product error:', error);
+    res.status(500).json({ error: 'Ошибка создания глобального товара' });
+  }
+});
+
+router.put('/global-products/:id', async (req, res) => {
+  try {
+    await ensureGlobalProductsSchema();
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID товара' });
+    }
+
+    const oldResult = await pool.query('SELECT * FROM global_products WHERE id = $1 LIMIT 1', [id]);
+    if (!oldResult.rows.length) {
+      return res.status(404).json({ error: 'Глобальный товар не найден' });
+    }
+    const oldProduct = oldResult.rows[0];
+
+    const nameRu = toOptionalTrimmedText(req.body?.name_ru).slice(0, 255);
+    if (!nameRu) {
+      return res.status(400).json({ error: 'Название (RU) обязательно' });
+    }
+
+    const nameUz = toOptionalTrimmedText(req.body?.name_uz).slice(0, 255);
+    const descriptionRu = toOptionalTrimmedText(req.body?.description_ru).slice(0, 3000);
+    const descriptionUz = toOptionalTrimmedText(req.body?.description_uz).slice(0, 3000);
+    const barcode = toOptionalTrimmedText(req.body?.barcode).slice(0, 120);
+    const ikpu = toOptionalTrimmedText(req.body?.ikpu).slice(0, 64);
+    const recommendedCategoryIdRaw = Number.parseInt(req.body?.recommended_category_id, 10);
+    const recommendedCategoryId = Number.isFinite(recommendedCategoryIdRaw) && recommendedCategoryIdRaw > 0
+      ? recommendedCategoryIdRaw
+      : null;
+    const unit = toOptionalTrimmedText(req.body?.unit).slice(0, 32) || 'шт';
+    const normalizedOrderStep = Number.parseFloat(String(req.body?.order_step ?? '').replace(',', '.'));
+    const orderStep = Number.isFinite(normalizedOrderStep) && normalizedOrderStep > 0
+      ? Math.round((normalizedOrderStep + Number.EPSILON) * 100) / 100
+      : null;
+    const sizeEnabled = req.body?.size_enabled === true || req.body?.size_enabled === 'true';
+    const sizeOptions = normalizeGlobalProductVariantOptions(req.body?.size_options);
+    const normalizedImages = normalizeGlobalProductImages(req.body?.product_images, GLOBAL_PRODUCT_MAX_IMAGES);
+    const fallbackImageUrl = toOptionalTrimmedText(req.body?.image_url);
+    const fallbackThumbUrl = toOptionalTrimmedText(req.body?.thumb_url);
+    if (normalizedImages.length === 0 && fallbackImageUrl) {
+      normalizedImages.push({
+        url: fallbackImageUrl,
+        ...(fallbackThumbUrl ? { thumb_url: fallbackThumbUrl } : {})
+      });
+    }
+    const mainImage = normalizedImages[0] || null;
+    const imageUrl = mainImage?.url || fallbackImageUrl || null;
+    const thumbUrl = mainImage?.thumb_url || fallbackThumbUrl || null;
+    const isActive = req.body?.is_active === undefined
+      ? oldProduct.is_active !== false
+      : (req.body?.is_active === true || req.body?.is_active === 'true');
+
+    if (recommendedCategoryId) {
+      const categoryExistsResult = await pool.query('SELECT id FROM categories WHERE id = $1 LIMIT 1', [recommendedCategoryId]);
+      if (!categoryExistsResult.rows.length) {
+        return res.status(400).json({ error: 'Рекомендуемая категория не найдена' });
+      }
+    }
+    const duplicateBarcodeProduct = await findGlobalProductByBarcode(barcode, id);
+    if (duplicateBarcodeProduct) {
+      return res.status(409).json({
+        error: `Штрихкод уже используется (товар #${duplicateBarcodeProduct.id}: ${duplicateBarcodeProduct.name_ru || 'без названия'})`
+      });
+    }
+
+    const result = await pool.query(
+      `
+        UPDATE global_products SET
+          name_ru = $1,
+          name_uz = $2,
+          description_ru = $3,
+          description_uz = $4,
+          image_url = $5,
+          thumb_url = $6,
+          product_images = $7::jsonb,
+          barcode = $8,
+          ikpu = $9,
+          recommended_category_id = $10,
+          unit = $11,
+          order_step = $12,
+          size_enabled = $13,
+          size_options = $14::jsonb,
+          is_active = $15,
+          updated_by = $16,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = $17
+        RETURNING *
+      `,
+      [
+        nameRu, nameUz || null, descriptionRu || null, descriptionUz || null,
+        imageUrl, thumbUrl, JSON.stringify(normalizedImages), barcode || null, ikpu || null,
+        recommendedCategoryId, unit, orderStep, sizeEnabled, JSON.stringify(sizeOptions),
+        isActive, req.user.id, id
+      ]
+    );
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    if (error?.code === '23505' && String(error?.constraint || '').includes('uq_global_products_barcode_normalized')) {
+      return res.status(409).json({ error: 'Штрихкод уже используется другим глобальным товаром' });
+    }
+    console.error('Update global product error:', error);
+    res.status(500).json({ error: 'Ошибка обновления глобального товара' });
+  }
+});
+
+router.delete('/global-products/:id', async (req, res) => {
+  try {
+    await ensureGlobalProductsSchema();
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID товара' });
+    }
+
+    const result = await pool.query(
+      `
+        UPDATE global_products
+        SET is_active = false, updated_at = CURRENT_TIMESTAMP, updated_by = $2
+        WHERE id = $1
+        RETURNING id
+      `,
+      [id, req.user.id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'Глобальный товар не найден' });
+    }
+
+    res.json({ message: 'Глобальный товар отключен' });
+  } catch (error) {
+    console.error('Delete global product error:', error);
+    res.status(500).json({ error: 'Ошибка удаления глобального товара' });
+  }
+});
+
+// =====================================================
+// КАТЕГОРИИ
+// =====================================================
+
+// Получить все категории
+router.get('/categories', async (req, res) => {
+  try {
+    const includeInactive = ['1', 'true', 'yes'].includes(
+      String(req.query.include_inactive || '').toLowerCase()
+    );
+    const categoriesFilter = includeInactive 
+      ? 'WHERE c.restaurant_id IS NULL' 
+      : 'WHERE c.is_active = true AND c.restaurant_id IS NULL';
+    const subcategoriesFilter = includeInactive 
+      ? 'AND sc.restaurant_id IS NULL' 
+      : 'AND sc.is_active = true AND sc.restaurant_id IS NULL';
+    const result = await pool.query(`
+      SELECT
+        c.*,
+        (SELECT COUNT(*)::int FROM products p WHERE p.category_id = c.id) AS products_count,
+        (SELECT COUNT(*)::int FROM categories sc WHERE sc.parent_id = c.id ${subcategoriesFilter}) AS subcategories_count
+      FROM categories c
+      ${categoriesFilter}
+      ORDER BY c.sort_order, c.name_ru
+    `);
+    res.json(result.rows || []);
+  } catch (error) {
+    console.error('Get categories error:', error);
+    res.status(500).json({ error: 'Ошибка получения категорий' });
+  }
+});
+
+// Добавить категорию
+router.post('/categories', async (req, res) => {
+  try {
+    const { name_ru, name_uz, image_url, sort_order, parent_id } = req.body;
+    const normalizedParentId = normalizeCategoryId(parent_id);
+    const normalizedRestaurantId = null; // Always null for global templates
+    const normalizedNameRu = normalizeCategoryName(name_ru);
+    const normalizedNameUz = normalizeCategoryName(name_uz);
+    const normalizedSortOrder = normalizeCategorySortOrder(sort_order, 0);
+
+    if (!normalizedNameRu) {
+      return res.status(400).json({ error: 'Название категории (RU) обязательно' });
+    }
+
+    if (normalizedParentId) {
+      let parentLevel = 0;
+      try {
+        parentLevel = await getCategoryLevelById(pool, normalizedParentId);
+      } catch (e) {
+        if (e.message === 'CATEGORY_NOT_FOUND') {
+          return res.status(400).json({ error: 'Родительская категория не найдена' });
+        }
+        if (e.message === 'CATEGORY_CYCLE') {
+          return res.status(400).json({ error: 'Обнаружена циклическая связь категорий' });
+        }
+        if (e.message === 'CATEGORY_CHAIN_TOO_DEEP') {
+          return res.status(400).json({ error: 'Обнаружена некорректная цепочка категорий' });
+        }
+        throw e;
+      }
+
+      if (parentLevel + 1 > MAX_CATEGORY_LEVEL) {
+        return res.status(400).json({ error: `Максимальная вложенность категорий: ${MAX_CATEGORY_LEVEL} уровня` });
+      }
+    }
+
+    const conflict = await findSiblingCategoryNameConflict({
+      client: pool,
+      parentId: normalizedParentId,
+      restaurantId: normalizedRestaurantId,
+      nameRu: normalizedNameRu,
+      nameUz: normalizedNameUz
+    });
+    if (conflict) {
+      if (conflict.field === 'name_ru') {
+        return res.status(400).json({ error: 'Категория с таким названием RU уже существует на этом уровне' });
+      }
+      return res.status(400).json({ error: 'Категория с таким названием UZ уже существует на этом уровне' });
+    }
+
+    const result = await pool.query(`
+      INSERT INTO categories (name_ru, name_uz, image_url, sort_order, parent_id, restaurant_id)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING *
+    `, [normalizedNameRu, normalizedNameUz || null, image_url, normalizedSortOrder, normalizedParentId, normalizedRestaurantId]);
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Create category error:', error);
+    res.status(500).json({ error: 'Ошибка создания категории' });
+  }
+});
+
+// Обновить категорию
+router.put('/categories/:id', async (req, res) => {
+  try {
+    const { name_ru, name_uz, image_url, sort_order, parent_id } = req.body;
+    const normalizedParentId = normalizeCategoryId(parent_id);
+    const normalizedRestaurantId = null; // Always null for global templates
+    const categoryId = Number.parseInt(req.params.id, 10);
+    const normalizedNameRu = normalizeCategoryName(name_ru);
+    const normalizedNameUz = normalizeCategoryName(name_uz);
+    const normalizedSortOrder = normalizeCategorySortOrder(sort_order, 0);
+
+    if (!normalizedNameRu) {
+      return res.status(400).json({ error: 'Название категории (RU) обязательно' });
+    }
+
+    // Get old values
+    const oldResult = await pool.query('SELECT * FROM categories WHERE id = $1', [req.params.id]);
+    if (oldResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Категория не найдена' });
+    }
+    const oldCategory = oldResult.rows[0];
+    if (oldCategory.restaurant_id !== null) {
+      return res.status(403).json({ error: 'Нельзя редактировать категорию конкретного ресторана через глобальный интерфейс' });
+    }
+
+    if (normalizedParentId && normalizedParentId === categoryId) {
+      return res.status(400).json({ error: 'Категория не может быть родителем самой себя' });
+    }
+
+    let parentLevel = 0;
+    if (normalizedParentId) {
+      try {
+        parentLevel = await getCategoryLevelById(pool, normalizedParentId, categoryId);
+      } catch (e) {
+        if (e.message === 'CATEGORY_NOT_FOUND') {
+          return res.status(400).json({ error: 'Родительская категория не найдена' });
+        }
+        if (e.message === 'CATEGORY_CYCLE') {
+          return res.status(400).json({ error: 'Нельзя переместить категорию в свою подкатегорию' });
+        }
+        if (e.message === 'CATEGORY_CHAIN_TOO_DEEP') {
+          return res.status(400).json({ error: 'Обнаружена некорректная цепочка категорий' });
+        }
+        throw e;
+      }
+    }
+
+    const subtreeDepth = await getCategorySubtreeDepth(pool, categoryId);
+    const resultingMaxLevel = parentLevel + subtreeDepth;
+    if (resultingMaxLevel > MAX_CATEGORY_LEVEL) {
+      return res.status(400).json({ error: `Максимальная вложенность категорий: ${MAX_CATEGORY_LEVEL} уровня` });
+    }
+
+    const conflict = await findSiblingCategoryNameConflict({
+      client: pool,
+      parentId: normalizedParentId,
+      restaurantId: normalizedRestaurantId,
+      nameRu: normalizedNameRu,
+      nameUz: normalizedNameUz,
+      excludeId: categoryId
+    });
+    if (conflict) {
+      if (conflict.field === 'name_ru') {
+        return res.status(400).json({ error: 'Категория с таким названием RU уже существует на этом уровне' });
+      }
+      return res.status(400).json({ error: 'Категория с таким названием UZ уже существует на этом уровне' });
+    }
+
+    const result = await pool.query(`
+      UPDATE categories SET
+        name_ru = $1, name_uz = $2, image_url = $3, sort_order = $4, 
+        parent_id = $5, restaurant_id = $6, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $7
+      RETURNING *
+    `, [normalizedNameRu, normalizedNameUz || null, image_url, normalizedSortOrder, normalizedParentId, normalizedRestaurantId, req.params.id]);
+
+    const category = result.rows[0];
+
+    // Log activity
+    await logActivity({
+      userId: req.user.id,
+      actionType: ACTION_TYPES.UPDATE_CATEGORY,
+      entityType: ENTITY_TYPES.CATEGORY,
+      entityId: category.id,
+      entityName: category.name_ru,
+      oldValues: oldCategory,
+      newValues: category,
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req)
+    });
+
+    res.json(category);
+  } catch (error) {
+    console.error('Update category error:', error);
+    res.status(500).json({ error: 'Ошибка обновления категории' });
+  }
+});
+
+// Удалить категорию
+router.delete('/categories/:id', async (req, res) => {
+  try {
+    // Get category
+    const categoryResult = await pool.query('SELECT * FROM categories WHERE id = $1', [req.params.id]);
+    if (categoryResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Категория не найдена' });
+    }
+    const category = categoryResult.rows[0];
+    if (category.restaurant_id !== null) {
+      return res.status(403).json({ error: 'Нельзя удалить категорию конкретного ресторана через глобальный интерфейс' });
+    }
+
+    // Check for products in category
+    const productsCheck = await pool.query(
+      'SELECT COUNT(*) as count FROM products WHERE category_id = $1',
+      [req.params.id]
+    );
+
+    if (parseInt(productsCheck.rows[0].count) > 0) {
+      return res.status(400).json({
+        error: 'Нельзя удалить категорию, в которой есть товары. Сначала удалите или переместите товары.'
+      });
+    }
+
+    // Check for subcategories
+    const subcatsCheck = await pool.query(
+      'SELECT COUNT(*) as count FROM categories WHERE parent_id = $1',
+      [req.params.id]
+    );
+
+    if (parseInt(subcatsCheck.rows[0].count) > 0) {
+      return res.status(400).json({
+        error: 'Нельзя удалить категорию, у которой есть подкатегории. Сначала удалите подкатегории.'
+      });
+    }
+
+    await pool.query('DELETE FROM categories WHERE id = $1', [req.params.id]);
+
+    // Log activity
+    await logActivity({
+      userId: req.user.id,
+      actionType: ACTION_TYPES.DELETE_CATEGORY,
+      entityType: ENTITY_TYPES.CATEGORY,
+      entityId: category.id,
+      entityName: category.name_ru,
+      oldValues: category,
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req)
+    });
+
+    res.json({ message: 'Категория удалена' });
+  } catch (error) {
+    console.error('Delete category error:', error);
+    res.status(500).json({ error: 'Ошибка удаления категории' });
+  }
+});
+
+
+// Добавить оператора
+router.post('/operators', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { username, password, full_name, phone, telegram_id, restaurant_ids, role, moderator_permissions } = req.body;
+    const normalizedAuth = normalizeOperatorAuthFields({ username, phone });
+    const normalizedRole = String(role || 'operator').trim().toLowerCase();
+    const normalizedModeratorPermissions = normalizeModeratorPermissions(moderator_permissions);
+
+    if (!normalizedAuth.username || !password) {
+      return res.status(400).json({ error: 'Логин и пароль обязательны' });
+    }
+    if (!['operator', 'moderator', 'superadmin'].includes(normalizedRole)) {
+      return res.status(400).json({ error: 'Недопустимая роль' });
+    }
+
+    await client.query('BEGIN');
+
+    // Check username uniqueness
+    const existingUser = await client.query('SELECT id FROM users WHERE username = $1', [normalizedAuth.username]);
+    if (existingUser.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Пользователь с таким логином уже существует' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const userResult = await client.query(`
+      INSERT INTO users (username, password, full_name, phone, role, is_active, telegram_id, moderator_permissions)
+      VALUES ($1, $2, $3, $4, $5, true, $6, $7::jsonb)
+      RETURNING id, username, full_name, phone, role, is_active, created_at, telegram_id, moderator_permissions
+    `, [
+      normalizedAuth.username,
+      hashedPassword,
+      full_name,
+      normalizedAuth.phone,
+      normalizedRole,
+      telegram_id || null,
+      JSON.stringify(normalizedModeratorPermissions)
+    ]);
+
+    const user = userResult.rows[0];
+
+    // Link to restaurants
+    if (restaurant_ids && restaurant_ids.length > 0) {
+      for (const restaurantId of restaurant_ids) {
+        await client.query(`
+          INSERT INTO operator_restaurants (user_id, restaurant_id)
+          VALUES ($1, $2)
+        `, [user.id, restaurantId]);
+      }
+
+      // Set first restaurant as active
+      await client.query(`
+        UPDATE users SET active_restaurant_id = $1 WHERE id = $2
+      `, [restaurant_ids[0], user.id]);
+    }
+
+    await client.query('COMMIT');
+
+    // Log activity
+    await logActivity({
+      userId: req.user.id,
+      actionType: ACTION_TYPES.CREATE_USER,
+      entityType: ENTITY_TYPES.USER,
+      entityId: user.id,
+      entityName: user.full_name || user.username,
+      newValues: { ...user, restaurant_ids },
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req)
+    });
+
+    res.status(201).json(normalizeUserIdentityForDisplay(user));
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Create operator error:', error);
+    res.status(500).json({ error: 'Ошибка создания оператора' });
+  } finally {
+    client.release();
+  }
+});
+
+// Обновить оператора
+router.put('/operators/:id', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { full_name, phone, password, is_active, telegram_id, restaurant_ids, role, moderator_permissions } = req.body;
+    const requestedRole = role === undefined ? undefined : String(role || '').trim().toLowerCase();
+    const normalizedModeratorPermissions = normalizeModeratorPermissions(moderator_permissions);
+    if (requestedRole !== undefined && !['operator', 'moderator', 'superadmin'].includes(requestedRole)) {
+      return res.status(400).json({ error: 'Недопустимая роль' });
+    }
+
+    await client.query('BEGIN');
+
+    // Get old values
+    const oldResult = await client.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
+    if (oldResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Оператор не найден' });
+    }
+    const oldValues = oldResult.rows[0];
+
+    const normalizedPhone = phone === undefined ? undefined : normalizePhoneValue(phone);
+    const syncUsernameToPhone = normalizedPhone && looksLikePhoneOrTelegramLogin(oldValues.username);
+    const normalizedUsernameFromPhone = syncUsernameToPhone ? phoneDigitsOnly(normalizedPhone) : null;
+
+    // Update user
+    let updateQuery = `
+      UPDATE users SET 
+        full_name = COALESCE($1, full_name),
+        phone = COALESCE($2, phone),
+        is_active = COALESCE($3, is_active),
+        telegram_id = $4,
+        role = COALESCE($5, role),
+        moderator_permissions = COALESCE($6::jsonb, moderator_permissions),
+        updated_at = CURRENT_TIMESTAMP
+    `;
+    let params = [
+      full_name,
+      normalizedPhone,
+      is_active,
+      telegram_id || null,
+      requestedRole || null,
+      moderator_permissions === undefined ? null : JSON.stringify(normalizedModeratorPermissions)
+    ];
+
+    if (normalizedUsernameFromPhone) {
+      updateQuery += `, username = $${params.length + 1}`;
+      params.push(normalizedUsernameFromPhone);
+    }
+
+    if (password) {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      updateQuery += `, password = $${params.length + 1}`;
+      params.push(hashedPassword);
+    }
+
+    updateQuery += ` WHERE id = $${params.length + 1} RETURNING *`;
+    params.push(req.params.id);
+
+    const userResult = await client.query(updateQuery, params);
+    const user = userResult.rows[0];
+
+    // Update restaurant links if provided
+    if (restaurant_ids !== undefined) {
+      // Remove old links
+      await client.query('DELETE FROM operator_restaurants WHERE user_id = $1', [req.params.id]);
+
+      // Add new links
+      for (const restaurantId of restaurant_ids) {
+        await client.query(`
+          INSERT INTO operator_restaurants (user_id, restaurant_id)
+          VALUES ($1, $2)
+        `, [req.params.id, restaurantId]);
+      }
+
+      // Update active restaurant if current one is not in new list
+      if (restaurant_ids.length > 0 && !restaurant_ids.includes(user.active_restaurant_id)) {
+        await client.query(`
+          UPDATE users SET active_restaurant_id = $1 WHERE id = $2
+        `, [restaurant_ids[0], req.params.id]);
+      } else if (restaurant_ids.length === 0) {
+        await client.query(`
+          UPDATE users SET active_restaurant_id = NULL WHERE id = $1
+        `, [req.params.id]);
+      }
+    }
+
+    await client.query('COMMIT');
+
+    // Log activity
+    await logActivity({
+      userId: req.user.id,
+      actionType: ACTION_TYPES.UPDATE_USER,
+      entityType: ENTITY_TYPES.USER,
+      entityId: user.id,
+      entityName: user.full_name || user.username,
+      oldValues,
+      newValues: { ...user, restaurant_ids },
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req)
+    });
+
+    res.json(normalizeUserIdentityForDisplay(user));
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Update operator error:', error);
+    res.status(500).json({ error: 'Ошибка обновления оператора' });
+  } finally {
+    client.release();
+  }
+});
+
+// Удалить оператора
+router.delete('/operators/:id', async (req, res) => {
+  try {
+    // Prevent self-deletion
+    if (parseInt(req.params.id) === req.user.id) {
+      return res.status(400).json({ error: 'Нельзя удалить самого себя' });
+    }
+
+    // Get user for logging
+    const userResult = await pool.query('SELECT * FROM users WHERE id = $1', [req.params.id]);
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Оператор не найден' });
+    }
+    const user = userResult.rows[0];
+
+    // Soft delete
+    await pool.query('UPDATE users SET is_active = false WHERE id = $1', [req.params.id]);
+
+    // Log activity
+    await logActivity({
+      userId: req.user.id,
+      actionType: ACTION_TYPES.DELETE_USER,
+      entityType: ENTITY_TYPES.USER,
+      entityId: user.id,
+      entityName: user.full_name || user.username,
+      oldValues: user,
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req)
+    });
+
+    res.json({ message: 'Оператор деактивирован' });
+  } catch (error) {
+    console.error('Delete operator error:', error);
+    res.status(500).json({ error: 'Ошибка удаления оператора' });
+  }
+});
+
+// Полностью удалить оператора из БД (только с паролем учредителей)
+router.delete('/operators/:id/permanent', async (req, res) => {
+  const operatorId = Number.parseInt(req.params.id, 10);
+  if (!Number.isFinite(operatorId) || operatorId <= 0) {
+    return res.status(400).json({ error: 'Некорректный ID оператора' });
+  }
+  if (operatorId === req.user.id) {
+    return res.status(400).json({ error: 'Нельзя удалить самого себя' });
+  }
+  if (!ensureFoundersAccessByPassword(req, res)) return;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const userResult = await client.query(
+      'SELECT * FROM users WHERE id = $1 FOR UPDATE',
+      [operatorId]
+    );
+    if (userResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Оператор не найден' });
+    }
+    const user = userResult.rows[0];
+    if (!['operator', 'moderator'].includes(String(user.role || '').toLowerCase())) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Можно удалять из БД только операторов/модераторов' });
+    }
+
+    const linkedRestaurantsResult = await client.query(
+      'SELECT COUNT(*)::int AS count FROM operator_restaurants WHERE user_id = $1',
+      [operatorId]
+    );
+    const linkedRestaurantsCount = Number(linkedRestaurantsResult.rows?.[0]?.count || 0);
+
+    await client.query('DELETE FROM users WHERE id = $1', [operatorId]);
+    await client.query('COMMIT');
+
+    await logActivity({
+      userId: req.user.id,
+      actionType: ACTION_TYPES.DELETE_USER,
+      entityType: ENTITY_TYPES.USER,
+      entityId: user.id,
+      entityName: user.full_name || user.username,
+      oldValues: user,
+      details: `Permanent delete from DB (founders password), linked restaurants: ${linkedRestaurantsCount}`,
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req)
+    });
+
+    return res.json({
+      message: 'Оператор полностью удален из базы данных',
+      deleted: true,
+      operator_id: operatorId
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Permanent delete operator error:', error);
+    return res.status(500).json({ error: 'Ошибка полного удаления оператора' });
+  } finally {
+    client.release();
+  }
+});
+
+// =====================================================
+// КЛИЕНТЫ
+// =====================================================
+
+// Получить всех клиентов
+router.get('/customers', async (req, res) => {
+  try {
+    const { page = 1, limit = 50, search = '', status = '', restaurant_id = '' } = req.query;
+    const offset = (page - 1) * limit;
+
+    let query = `
+      SELECT 
+        u.id as user_id, u.id as association_id, u.username, u.full_name, u.phone, u.telegram_id,
+        u.active_restaurant_id as restaurant_id,
+        u.is_active as user_is_active, COALESCE(ur.is_blocked, false) as is_blocked, u.created_at,
+        u.last_activity_at,
+        u.last_ip_address,
+        u.last_user_agent,
+        u.last_device_type,
+        u.last_browser_name,
+        u.last_browser_version,
+        u.last_os_name,
+        u.last_os_version,
+        u.last_country,
+        u.last_region,
+        u.last_city,
+        r.name as restaurant_name,
+        COUNT(o.id) as orders_count,
+        COALESCE(SUM(o.total_amount), 0) as total_spent,
+        MAX(o.created_at) as last_order_date
+      FROM users u
+      LEFT JOIN restaurants r ON u.active_restaurant_id = r.id
+      LEFT JOIN user_restaurants ur ON ur.user_id = u.id AND ur.restaurant_id = u.active_restaurant_id
+      LEFT JOIN orders o ON u.id = o.user_id
+      WHERE u.role = 'customer'
+    `;
+
+    const params = [];
+    if (search) {
+      query += ` AND (u.full_name ILIKE $${params.length + 1} OR u.phone ILIKE $${params.length + 1} OR u.username ILIKE $${params.length + 1})`;
+      params.push(`%${search}%`);
+    }
+
+    if (restaurant_id) {
+      query += ` AND u.active_restaurant_id = $${params.length + 1}`;
+      params.push(restaurant_id);
+    }
+
+    if (status === 'active') {
+      query += ` AND u.is_active = true`;
+    } else if (status === 'blocked') {
+      query += ` AND (u.is_active = false OR COALESCE(ur.is_blocked, false) = true)`;
+    }
+
+    query += ` GROUP BY u.id, u.active_restaurant_id, r.name, ur.is_blocked ORDER BY u.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
+
+    const result = await pool.query(query, params);
+    const rows = Array.isArray(result.rows) ? result.rows : [];
+
+    const missingTelemetryUserIds = rows
+      .filter((row) => (
+        !row?.last_activity_at
+        || !row?.last_ip_address
+        || !row?.last_user_agent
+        || !row?.last_device_type
+        || !row?.last_browser_name
+        || !row?.last_os_name
+      ))
+      .map((row) => Number(row.user_id))
+      .filter((id) => Number.isFinite(id) && id > 0);
+
+    let mergedRows = rows;
+    if (missingTelemetryUserIds.length > 0) {
+      await refreshUserTelemetryFromActivityLogs({ userIds: missingTelemetryUserIds }).catch(() => {});
+
+      const refreshedTelemetryResult = await pool.query(
+        `SELECT
+           id,
+           last_activity_at,
+           last_ip_address,
+           last_user_agent,
+           last_device_type,
+           last_browser_name,
+           last_browser_version,
+           last_os_name,
+           last_os_version,
+           last_country,
+           last_region,
+           last_city
+         FROM users
+         WHERE id = ANY($1::int[])`,
+        [missingTelemetryUserIds]
+      );
+
+      const telemetryMap = new Map(
+        (refreshedTelemetryResult.rows || []).map((item) => [Number(item.id), item])
+      );
+      mergedRows = rows.map((row) => {
+        const telemetry = telemetryMap.get(Number(row.user_id));
+        if (!telemetry) return row;
+        return { ...row, ...telemetry };
+      });
+    }
+
+    // Get total count
+    let countQuery = 'SELECT COUNT(*) FROM users WHERE role = $1';
+    const countParams = ['customer'];
+    if (search) {
+      countQuery += ` AND (full_name ILIKE $2 OR phone ILIKE $2 OR username ILIKE $2)`;
+      countParams.push(`%${search}%`);
+    }
+    if (restaurant_id) {
+      countQuery += ` AND active_restaurant_id = $${countParams.length + 1}`;
+      countParams.push(restaurant_id);
+    }
+    if (status === 'active') {
+      countQuery += ` AND is_active = true`;
+    } else if (status === 'blocked') {
+      countQuery += ` AND (
+        is_active = false OR EXISTS (
+          SELECT 1 FROM user_restaurants ur
+          WHERE ur.user_id = users.id AND ur.is_blocked = true
+        )
+      )`;
+    }
+    const countResult = await pool.query(countQuery, countParams);
+
+    res.json({
+      customers: mergedRows.map(normalizeUserIdentityForDisplay),
+      total: parseInt(countResult.rows[0].count),
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+  } catch (error) {
+    console.error('Get customers error:', error);
+    res.status(500).json({ error: 'Ошибка получения клиентов' });
+  }
+});
+
+// Получить детали клиента
+router.get('/customers/:id', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        u.id, u.username, u.full_name, u.phone, u.telegram_id, u.is_active, u.created_at,
+        COUNT(o.id) as orders_count,
+        COALESCE(SUM(o.total_amount), 0) as total_spent
+      FROM users u
+      LEFT JOIN orders o ON u.id = o.user_id
+      WHERE u.id = $1 AND u.role = 'customer'
+      GROUP BY u.id
+    `, [req.params.id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Клиент не найден' });
+    }
+
+    res.json(normalizeUserIdentityForDisplay(result.rows[0]));
+  } catch (error) {
+    console.error('Get customer error:', error);
+    res.status(500).json({ error: 'Ошибка получения клиента' });
+  }
+});
+
+// Заблокировать/разблокировать клиента
+router.put('/customers/:id/toggle-block', async (req, res) => {
+  try {
+    // Get current status
+    const currentResult = await pool.query('SELECT * FROM users WHERE id = $1 AND role = $2', [req.params.id, 'customer']);
+
+    if (currentResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Клиент не найден' });
+    }
+
+    const customer = currentResult.rows[0];
+    const newStatus = !customer.is_active;
+
+    await pool.query('UPDATE users SET is_active = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', [newStatus, req.params.id]);
+
+    // Log activity
+    await logActivity({
+      userId: req.user.id,
+      actionType: newStatus ? ACTION_TYPES.UNBLOCK_USER : ACTION_TYPES.BLOCK_USER,
+      entityType: ENTITY_TYPES.USER,
+      entityId: customer.id,
+      entityName: customer.full_name || customer.username,
+      oldValues: { is_active: customer.is_active },
+      newValues: { is_active: newStatus },
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req)
+    });
+
+    res.json({
+      message: newStatus ? 'Клиент разблокирован' : 'Клиент заблокирован',
+      is_active: newStatus
+    });
+  } catch (error) {
+    console.error('Toggle customer block error:', error);
+    res.status(500).json({ error: 'Ошибка изменения статуса клиента' });
+  }
+});
+
+// Удалить клиента
+router.delete('/customers/:id', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Get customer data
+    const customerResult = await client.query('SELECT * FROM users WHERE id = $1 AND role = $2', [req.params.id, 'customer']);
+
+    if (customerResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Клиент не найден' });
+    }
+
+    const customer = customerResult.rows[0];
+
+    // Check if customer has orders
+    const ordersResult = await client.query('SELECT COUNT(*) FROM orders WHERE user_id = $1', [req.params.id]);
+    const ordersCount = parseInt(ordersResult.rows[0].count);
+
+    if (ordersCount > 0) {
+      // Soft delete - just block the customer
+      await client.query('UPDATE users SET is_active = false, updated_at = CURRENT_TIMESTAMP WHERE id = $1', [req.params.id]);
+      await client.query('COMMIT');
+
+      await logActivity({
+        userId: req.user.id,
+        actionType: ACTION_TYPES.DELETE_USER,
+        entityType: ENTITY_TYPES.USER,
+        entityId: customer.id,
+        entityName: customer.full_name || customer.username,
+        oldValues: customer,
+        newValues: { is_active: false, soft_deleted: true },
+        details: `Soft delete (${ordersCount} заказов)`,
+        ipAddress: getIpFromRequest(req),
+        userAgent: getUserAgentFromRequest(req)
+      });
+
+      return res.json({
+        message: `Клиент деактивирован (имеет ${ordersCount} заказов)`,
+        soft_deleted: true
+      });
+    }
+
+    // Hard delete if no orders
+    await client.query('DELETE FROM users WHERE id = $1', [req.params.id]);
+    await client.query('COMMIT');
+
+    await logActivity({
+      userId: req.user.id,
+      actionType: ACTION_TYPES.DELETE_USER,
+      entityType: ENTITY_TYPES.USER,
+      entityId: customer.id,
+      entityName: customer.full_name || customer.username,
+      oldValues: customer,
+      details: 'Hard delete (no orders)',
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req)
+    });
+
+    res.json({ message: 'Клиент удален', deleted: true });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Delete customer error:', error);
+    res.status(500).json({ error: 'Ошибка удаления клиента' });
+  } finally {
+    client.release();
+  }
+});
+
+// Получить историю заказов клиента
+router.get('/customers/:id/orders', async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+    const offset = (page - 1) * limit;
+
+    // Verify customer exists
+    const customerResult = await pool.query('SELECT id, full_name FROM users WHERE id = $1 AND role = $2', [req.params.id, 'customer']);
+    if (customerResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Клиент не найден' });
+    }
+
+    // Get orders with items
+    const ordersResult = await pool.query(`
+      SELECT 
+        o.id, o.order_number, o.status, o.total_amount, o.payment_method,
+        o.customer_name, o.customer_phone, o.delivery_address, o.delivery_coordinates,
+        o.delivery_date, o.delivery_time, o.comment, o.created_at, o.updated_at,
+        r.name as restaurant_name, r.id as restaurant_id,
+        u_operator.full_name as processed_by_name,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', oi.id,
+              'product_id', oi.product_id,
+              'product_name', oi.product_name,
+              'quantity', oi.quantity,
+              'unit', oi.unit,
+              'price', oi.price,
+              'total', oi.quantity * oi.price
+            )
+          ) FILTER (WHERE oi.id IS NOT NULL),
+          '[]'
+        ) as items
+      FROM orders o
+      LEFT JOIN restaurants r ON o.restaurant_id = r.id
+      LEFT JOIN users u_operator ON o.processed_by = u_operator.id
+      LEFT JOIN order_items oi ON o.id = oi.order_id
+      WHERE o.user_id = $1
+      GROUP BY o.id, r.name, r.id, u_operator.full_name
+      ORDER BY o.created_at DESC
+      LIMIT $2 OFFSET $3
+    `, [req.params.id, limit, offset]);
+
+    // Get total count
+    const countResult = await pool.query('SELECT COUNT(*) FROM orders WHERE user_id = $1', [req.params.id]);
+
+    res.json({
+      customer: customerResult.rows[0],
+      orders: ordersResult.rows,
+      total: parseInt(countResult.rows[0].count),
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+  } catch (error) {
+    console.error('Get customer orders error:', error);
+    res.status(500).json({ error: 'Ошибка получения заказов клиента' });
+  }
+});
+
+// =====================================================
+// РАССЫЛКА ДЛЯ СУПЕРАДМИНА
+// =====================================================
+router.post('/broadcast', async (req, res) => {
+  try {
+    const { message, image_url, video_url, roles } = req.body || {};
+    const normalizedMessage = toOptionalTrimmedText(message);
+    const normalizedImageUrl = toOptionalTrimmedText(image_url) || null;
+    const normalizedVideoUrl = toOptionalTrimmedText(video_url) || null;
+    const roleCandidates = Array.isArray(roles) ? roles : [roles];
+    const normalizedRoles = Array.from(new Set(
+      roleCandidates
+        .map((item) => String(item || '').trim().toLowerCase())
+        .filter((item) => item === 'operator' || item === 'customer')
+    ));
+
+    if (!normalizedMessage) {
+      return res.status(400).json({ error: 'Текст сообщения обязателен' });
+    }
+    if (normalizedImageUrl && normalizedVideoUrl) {
+      return res.status(400).json({ error: 'Можно выбрать только один тип медиа: фото или видео' });
+    }
+    if (!normalizedRoles.length) {
+      return res.status(400).json({ error: 'Выберите хотя бы одну роль получателей' });
+    }
+
+    const bot = getBot();
+    if (!bot) {
+      return res.status(400).json({ error: 'Центральный Telegram-бот не запущен. Проверьте BOT_TOKEN.' });
+    }
+
+    const recipientsResult = await pool.query(
+      `
+        SELECT DISTINCT ON (u.telegram_id)
+          u.id,
+          u.full_name,
+          u.username,
+          u.role,
+          u.telegram_id
+        FROM users u
+        WHERE u.is_active = true
+          AND u.telegram_id IS NOT NULL
+          AND u.role = ANY($1::text[])
+        ORDER BY u.telegram_id, u.id ASC
+      `,
+      [normalizedRoles]
+    );
+    const recipients = recipientsResult.rows || [];
+    if (!recipients.length) {
+      return res.status(400).json({ error: 'Нет получателей с Telegram ID по выбранным ролям' });
+    }
+
+    let sent = 0;
+    let failed = 0;
+    const errors = [];
+    const sentRecipients = [];
+    const roleStats = { operator: 0, customer: 0 };
+    const MAX_LOGGED_BROADCAST_RECIPIENTS = 1000;
+    const broadcastMessage = `📢 <b>SuperAdmin</b>\n\n${normalizedMessage}`;
+
+    for (const recipient of recipients) {
+      try {
+        if (normalizedVideoUrl) {
+          await bot.sendVideo(recipient.telegram_id, normalizedVideoUrl, {
+            caption: broadcastMessage,
+            parse_mode: 'HTML'
+          });
+        } else if (normalizedImageUrl) {
+          await bot.sendPhoto(recipient.telegram_id, normalizedImageUrl, {
+            caption: broadcastMessage,
+            parse_mode: 'HTML'
+          });
+        } else {
+          await bot.sendMessage(recipient.telegram_id, broadcastMessage, {
+            parse_mode: 'HTML'
+          });
+        }
+        sent += 1;
+        if (recipient.role === 'operator') roleStats.operator += 1;
+        if (recipient.role === 'customer') roleStats.customer += 1;
+        if (sentRecipients.length < MAX_LOGGED_BROADCAST_RECIPIENTS) {
+          sentRecipients.push({
+            id: recipient.id,
+            role: recipient.role,
+            telegram_id: String(recipient.telegram_id || ''),
+            user: recipient.full_name || recipient.username || `ID ${recipient.id}`
+          });
+        }
+        await new Promise((resolve) => setTimeout(resolve, 35));
+      } catch (err) {
+        failed += 1;
+        if (errors.length < MAX_LOGGED_BROADCAST_RECIPIENTS) {
+          errors.push({
+            id: recipient.id,
+            telegram_id: String(recipient.telegram_id || ''),
+            user: recipient.full_name || recipient.username || `ID ${recipient.id}`,
+            role: recipient.role,
+            error: err?.message || 'Unknown error'
+          });
+        }
+      }
+    }
+
+    await logActivity({
+      userId: req.user.id,
+      actionType: 'broadcast',
+      entityType: 'notification',
+      entityId: null,
+      entityName: 'Superadmin broadcast',
+      newValues: {
+        roles: normalizedRoles,
+        message: normalizedMessage,
+        image_url: normalizedImageUrl,
+        video_url: normalizedVideoUrl,
+        sent,
+        failed,
+        total: recipients.length,
+        roleStats,
+        sent_recipients: sentRecipients,
+        sent_recipients_truncated: sent > sentRecipients.length,
+        errors,
+        errors_truncated: failed > errors.length
+      },
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req)
+    });
+
+    res.json({
+      message: 'Рассылка завершена',
+      roles: normalizedRoles,
+      sent,
+      failed,
+      total: recipients.length,
+      role_stats: roleStats,
+      sent_recipients: sentRecipients.slice(0, 200),
+      sent_recipients_truncated: sent > sentRecipients.length,
+      errors: errors.slice(0, 200),
+      errors_truncated: failed > errors.length
+    });
+  } catch (error) {
+    console.error('Superadmin broadcast error:', error);
+    res.status(500).json({ error: 'Ошибка рассылки: ' + error.message });
+  }
+});
+
+router.get('/broadcast/history', async (req, res) => {
+  try {
+    const requestedLimit = Number.parseInt(req.query?.limit, 10);
+    const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 200) : 50;
+    const requestedPage = Number.parseInt(req.query?.page, 10);
+    const page = Number.isFinite(requestedPage) ? Math.max(requestedPage, 1) : 1;
+    const offset = (page - 1) * limit;
+    const normalizeBroadcastRole = (value) => {
+      const normalized = String(value || '').trim().toLowerCase();
+      return (normalized === 'operator' || normalized === 'customer') ? normalized : '';
+    };
+    const normalizeBroadcastUserLabel = (value) => (
+      String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase()
+    );
+
+    const historyResult = await pool.query(
+      `
+        SELECT
+          al.id,
+          al.created_at,
+          al.new_values,
+          COALESCE(NULLIF(BTRIM(u.full_name), ''), NULLIF(BTRIM(u.username), ''), CONCAT('ID ', al.user_id::text)) AS sender_name,
+          u.username AS sender_username
+        FROM activity_logs al
+        LEFT JOIN users u ON u.id = al.user_id
+        WHERE al.action_type = 'broadcast'
+          AND al.entity_type = 'notification'
+        ORDER BY al.created_at DESC, al.id DESC
+        LIMIT $1 OFFSET $2
+      `,
+      [limit, offset]
+    );
+    const countResult = await pool.query(`
+      SELECT COUNT(*)::int AS total
+      FROM activity_logs al
+      WHERE al.action_type = 'broadcast'
+        AND al.entity_type = 'notification'
+    `);
+
+    const roleRecipientCache = new Map();
+    const getRecipientsSnapshotByRoles = async (roles = []) => {
+      const normalizedRoles = Array.from(new Set(
+        (Array.isArray(roles) ? roles : [])
+          .map((item) => normalizeBroadcastRole(item))
+          .filter(Boolean)
+      ));
+      if (!normalizedRoles.length) return [];
+
+      const cacheKey = normalizedRoles.slice().sort().join('|');
+      if (roleRecipientCache.has(cacheKey)) return roleRecipientCache.get(cacheKey);
+
+      const recipientsResult = await pool.query(
+        `
+          SELECT DISTINCT ON (u.telegram_id)
+            u.id,
+            u.full_name,
+            u.username,
+            u.role,
+            u.telegram_id
+          FROM users u
+          WHERE u.is_active = true
+            AND u.telegram_id IS NOT NULL
+            AND u.role = ANY($1::text[])
+          ORDER BY u.telegram_id, u.id ASC
+        `,
+        [normalizedRoles]
+      );
+
+      const snapshot = (recipientsResult.rows || []).map((recipient) => ({
+        id: Number(recipient.id || 0),
+        role: normalizeBroadcastRole(recipient.role),
+        telegram_id: String(recipient.telegram_id || ''),
+        user: recipient.full_name || recipient.username || `ID ${recipient.id}`
+      }));
+      roleRecipientCache.set(cacheKey, snapshot);
+      return snapshot;
+    };
+
+    const items = (historyResult.rows || []).map((row) => {
+      const payload = row?.new_values && typeof row.new_values === 'object' ? row.new_values : {};
+      const rolesRaw = Array.isArray(payload.roles) ? payload.roles : [];
+      const roles = Array.from(new Set(
+        rolesRaw
+          .map((item) => normalizeBroadcastRole(item))
+          .filter(Boolean)
+      ));
+      const roleStats = payload?.roleStats && typeof payload.roleStats === 'object' ? payload.roleStats : {};
+      const sent = Number.parseInt(payload.sent, 10) || 0;
+      const failed = Number.parseInt(payload.failed, 10) || 0;
+      const total = Number.parseInt(payload.total, 10) || 0;
+      const sentRecipients = Array.isArray(payload.sent_recipients) ? payload.sent_recipients.slice(0, 1000) : [];
+      const errors = Array.isArray(payload.errors) ? payload.errors.slice(0, 1000) : [];
+
+      return {
+        id: Number(row.id || 0),
+        created_at: row.created_at || null,
+        sender_name: row.sender_name || null,
+        sender_username: row.sender_username || null,
+        message: toOptionalTrimmedText(payload.message),
+        image_url: toOptionalTrimmedText(payload.image_url),
+        video_url: toOptionalTrimmedText(payload.video_url),
+        roles,
+        sent,
+        failed,
+        total,
+        role_stats: {
+          operator: Number.parseInt(roleStats.operator, 10) || 0,
+          customer: Number.parseInt(roleStats.customer, 10) || 0
+        },
+        sent_recipients: sentRecipients,
+        sent_recipients_truncated: payload.sent_recipients_truncated === true,
+        sent_recipients_inferred: false,
+        errors,
+        errors_truncated: payload.errors_truncated === true
+      };
+    });
+
+    for (const item of items) {
+      if (item.sent_recipients.length > 0 || item.sent <= 0 || item.roles.length === 0) continue;
+
+      const recipientsSnapshot = await getRecipientsSnapshotByRoles(item.roles);
+      if (!recipientsSnapshot.length) continue;
+
+      const failedIdSet = new Set();
+      const failedTelegramSet = new Set();
+      const failedRoleNameSet = new Set();
+
+      for (const failedEntry of item.errors) {
+        const failedRole = normalizeBroadcastRole(failedEntry?.role);
+        const parsedFailedId = Number.parseInt(failedEntry?.id, 10);
+        if (Number.isInteger(parsedFailedId) && parsedFailedId > 0) {
+          failedIdSet.add(parsedFailedId);
+        }
+
+        const failedTelegramId = String(failedEntry?.telegram_id || '').trim();
+        if (failedTelegramId) {
+          failedTelegramSet.add(failedTelegramId);
+        }
+
+        const failedNameKey = normalizeBroadcastUserLabel(failedEntry?.user || failedEntry?.username || '');
+        if (failedRole && failedNameKey) {
+          failedRoleNameSet.add(`${failedRole}|${failedNameKey}`);
+        }
+      }
+
+      const inferredSentRecipients = recipientsSnapshot.filter((recipient) => {
+        if (failedIdSet.has(recipient.id)) return false;
+        if (failedTelegramSet.has(recipient.telegram_id)) return false;
+        const recipientNameKey = normalizeBroadcastUserLabel(recipient.user);
+        if (recipient.role && recipientNameKey && failedRoleNameSet.has(`${recipient.role}|${recipientNameKey}`)) {
+          return false;
+        }
+        return true;
+      });
+
+      const expectedSent = item.sent > 0 ? item.sent : inferredSentRecipients.length;
+      const resolvedSentRecipients = inferredSentRecipients.slice(0, Math.max(0, expectedSent));
+      item.sent_recipients = resolvedSentRecipients;
+      item.sent_recipients_inferred = true;
+      item.sent_recipients_truncated = item.sent_recipients_truncated
+        || inferredSentRecipients.length > resolvedSentRecipients.length
+        || expectedSent > resolvedSentRecipients.length;
+    }
+
+    res.json({
+      items,
+      total: Number(countResult.rows?.[0]?.total || 0),
+      page,
+      limit
+    });
+  } catch (error) {
+    console.error('Superadmin broadcast history error:', error);
+    res.status(500).json({ error: 'Ошибка загрузки истории рассылок' });
+  }
+});
+
+// =====================================================
+// ЛОГИ АКТИВНОСТИ
+// =====================================================
+
+// Получить логи
+router.get('/logs', async (req, res) => {
+  try {
+    const {
+      restaurant_id,
+      user_id,
+      user_role,
+      action_type,
+      entity_type,
+      start_date,
+      end_date,
+      page = 1,
+      limit = 50
+    } = req.query;
+
+    const offset = (page - 1) * limit;
+    const normalizedUserRole = ['operator', 'customer', 'superadmin'].includes(String(user_role || '').toLowerCase())
+      ? String(user_role || '').toLowerCase()
+      : null;
+
+    const result = await getActivityLogs({
+      restaurantId: restaurant_id,
+      userId: user_id,
+      userRole: normalizedUserRole,
+      actionType: action_type,
+      entityType: entity_type,
+      startDate: start_date,
+      endDate: end_date,
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+
+    res.json({
+      logs: result.logs,
+      total: result.total,
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+  } catch (error) {
+    console.error('Get logs error:', error);
+    res.status(500).json({ error: 'Ошибка получения логов' });
+  }
+});
+
+// Получить статистику логов
+router.get('/logs/stats', async (req, res) => {
+  try {
+    const { restaurant_id, days = 7 } = req.query;
+    const stats = await getActivityStats(restaurant_id, parseInt(days));
+    res.json(stats);
+  } catch (error) {
+    console.error('Get logs stats error:', error);
+    res.status(500).json({ error: 'Ошибка получения статистики' });
+  }
+});
+
+// Мониторинг атак / инцидентов безопасности
+router.get('/security/events', async (req, res) => {
+  try {
+    await ensureSecurityEventsSchema();
+    const result = await listSecurityEvents({
+      eventType: req.query?.event_type,
+      riskLevel: req.query?.risk_level,
+      status: req.query?.status,
+      sourceIp: req.query?.source_ip,
+      search: req.query?.search,
+      startDate: req.query?.start_date,
+      endDate: req.query?.end_date,
+      page: req.query?.page,
+      limit: req.query?.limit
+    });
+
+    res.json(result);
+  } catch (error) {
+    console.error('Get security events error:', error);
+    res.status(500).json({ error: 'Ошибка получения событий безопасности' });
+  }
+});
+
+router.get('/security/events/stats', async (_req, res) => {
+  try {
+    await ensureSecurityEventsSchema();
+    const stats = await getSecurityEventsStats();
+    res.json(stats);
+  } catch (error) {
+    console.error('Get security events stats error:', error);
+    res.status(500).json({ error: 'Ошибка получения статистики безопасности' });
+  }
+});
+
+router.patch('/security/events/:id/status', async (req, res) => {
+  try {
+    await ensureSecurityEventsSchema();
+    const updated = await setSecurityEventStatus({
+      eventId: req.params.id,
+      status: req.body?.status,
+      resolvedBy: req.user?.id,
+      resolutionNote: req.body?.resolution_note
+    });
+
+    res.json(updated);
+  } catch (error) {
+    const message = String(error?.message || '');
+    if (message === 'INVALID_EVENT_ID') {
+      return res.status(400).json({ error: 'Некорректный ID события' });
+    }
+    if (message === 'INVALID_STATUS') {
+      return res.status(400).json({ error: 'Некорректный статус события' });
+    }
+    if (message === 'EVENT_NOT_FOUND') {
+      return res.status(404).json({ error: 'Событие не найдено' });
+    }
+    console.error('Update security event status error:', error);
+    res.status(500).json({ error: 'Ошибка обновления статуса события безопасности' });
+  }
+});
+
+router.get('/telemetry/analytics', async (req, res) => {
+  try {
+    await ensureUserTelemetrySchema().catch(() => {});
+
+    const requestedHours = Number.parseInt(req.query?.hours, 10);
+    const hours = Number.isFinite(requestedHours)
+      ? Math.min(168, Math.max(1, requestedHours))
+      : 24;
+
+    const getRoleTelemetryBuckets = async ({ role, field, fallbackLabel = 'unknown', limit = 12 }) => {
+      const result = await pool.query(
+        `
+        SELECT
+          COALESCE(NULLIF(BTRIM(${field}), ''), $2) AS label,
+          COUNT(*)::int AS count
+        FROM users
+        WHERE role = $1
+        GROUP BY 1
+        ORDER BY count DESC, label ASC
+        LIMIT $3
+      `,
+        [role, fallbackLabel, limit]
+      );
+      return result.rows.map((row) => ({
+        label: String(row.label || fallbackLabel),
+        count: Number.parseInt(row.count, 10) || 0
+      }));
+    };
+
+    const [
+      roleTotalsResult,
+      activeWindowResult,
+      hourlyActivityResult,
+      operatorDevices,
+      operatorOs,
+      operatorBrowsers,
+      customerDevices,
+      customerOs,
+      customerBrowsers
+    ] = await Promise.all([
+      pool.query(
+        `
+        SELECT role, COUNT(*)::int AS total
+        FROM users
+        WHERE role IN ('operator', 'customer')
+        GROUP BY role
+      `
+      ),
+      pool.query(
+        `
+        SELECT u.role, COUNT(DISTINCT al.user_id)::int AS active_users
+        FROM activity_logs al
+        INNER JOIN users u ON u.id = al.user_id
+        WHERE u.role IN ('operator', 'customer')
+          AND al.created_at >= NOW() - make_interval(hours => $1::int)
+        GROUP BY u.role
+      `,
+        [hours]
+      ),
+      pool.query(
+        `
+        WITH hour_series AS (
+          SELECT generate_series(
+            date_trunc('hour', NOW() - make_interval(hours => GREATEST($1::int - 1, 0))),
+            date_trunc('hour', NOW()),
+            INTERVAL '1 hour'
+          ) AS hour_bucket
+        ),
+        hourly_activity AS (
+          SELECT
+            date_trunc('hour', al.created_at) AS hour_bucket,
+            u.role,
+            COUNT(DISTINCT al.user_id)::int AS active_users
+          FROM activity_logs al
+          INNER JOIN users u ON u.id = al.user_id
+          WHERE u.role IN ('operator', 'customer')
+            AND al.created_at >= NOW() - make_interval(hours => $1::int)
+          GROUP BY date_trunc('hour', al.created_at), u.role
+        )
+        SELECT
+          hs.hour_bucket,
+          COALESCE(MAX(CASE WHEN ha.role = 'operator' THEN ha.active_users END), 0)::int AS operators,
+          COALESCE(MAX(CASE WHEN ha.role = 'customer' THEN ha.active_users END), 0)::int AS customers
+        FROM hour_series hs
+        LEFT JOIN hourly_activity ha ON ha.hour_bucket = hs.hour_bucket
+        GROUP BY hs.hour_bucket
+        ORDER BY hs.hour_bucket ASC
+      `,
+        [hours]
+      ),
+      getRoleTelemetryBuckets({ role: 'operator', field: 'last_device_type' }),
+      getRoleTelemetryBuckets({ role: 'operator', field: 'last_os_name' }),
+      getRoleTelemetryBuckets({ role: 'operator', field: 'last_browser_name' }),
+      getRoleTelemetryBuckets({ role: 'customer', field: 'last_device_type' }),
+      getRoleTelemetryBuckets({ role: 'customer', field: 'last_os_name' }),
+      getRoleTelemetryBuckets({ role: 'customer', field: 'last_browser_name' })
+    ]);
+
+    const totalsMap = new Map(
+      roleTotalsResult.rows.map((row) => [String(row.role), Number.parseInt(row.total, 10) || 0])
+    );
+    const activeMap = new Map(
+      activeWindowResult.rows.map((row) => [String(row.role), Number.parseInt(row.active_users, 10) || 0])
+    );
+
+    res.json({
+      generated_at: new Date().toISOString(),
+      window_hours: hours,
+      operators: {
+        total: totalsMap.get('operator') || 0,
+        active_in_window: activeMap.get('operator') || 0,
+        devices: operatorDevices,
+        os: operatorOs,
+        browsers: operatorBrowsers
+      },
+      customers: {
+        total: totalsMap.get('customer') || 0,
+        active_in_window: activeMap.get('customer') || 0,
+        devices: customerDevices,
+        os: customerOs,
+        browsers: customerBrowsers
+      },
+      hourly_activity: (hourlyActivityResult.rows || []).map((row) => ({
+        hour: row.hour_bucket,
+        operators: Number.parseInt(row.operators, 10) || 0,
+        customers: Number.parseInt(row.customers, 10) || 0
+      }))
+    });
+  } catch (error) {
+    console.error('Get telemetry analytics error:', error);
+    res.status(500).json({ error: 'Ошибка получения скрытой аналитики' });
+  }
+});
+
+// =====================================================
+// СТАТИСТИКА
+// =====================================================
+
+// Общая статистика для супер-админа
+router.get('/stats', async (req, res) => {
+  try {
+    const stats = await pool.query(`
+      SELECT 
+        (SELECT COUNT(*) FROM restaurants) as restaurants_count,
+        (SELECT COUNT(*) FROM users WHERE role = 'operator' AND is_active = true) as operators_count,
+        (SELECT COUNT(*) FROM users WHERE role = 'customer') as customers_count,
+        (SELECT COUNT(*) FROM products) as products_count,
+        (SELECT COUNT(*) FROM orders WHERE status = 'new') as new_orders_count,
+        (SELECT COUNT(*) FROM orders WHERE created_at >= CURRENT_DATE AND created_at < CURRENT_DATE + INTERVAL '1 day') as today_orders_count,
+        (SELECT COALESCE(SUM(total_amount), 0) FROM orders WHERE created_at >= CURRENT_DATE AND created_at < CURRENT_DATE + INTERVAL '1 day') as today_revenue
+    `);
+
+    res.json(stats.rows[0]);
+  } catch (error) {
+    console.error('Get stats error:', error);
+    res.status(500).json({ error: 'Ошибка получения статистики' });
+  }
+});
+
+// Сводная аналитика (день/месяц/год) для суперадмина
+router.get('/analytics/overview', async (req, res) => {
+  try {
+    await ensureOrderRatingsSchema();
+    const analyticsRange = resolveAnalyticsRange(req.query || {});
+    const startDateKey = analyticsRange.startDateKey;
+    const endDateKeyExclusive = analyticsRange.endDateKeyExclusive;
+    const parsedTopLimit = Number.parseInt(req.query.top_limit, 10);
+    const topLimit = [10, 50, 100].includes(parsedTopLimit) ? parsedTopLimit : 10;
+
+    let restaurantId = null;
+    if (req.query.restaurant_id !== undefined && req.query.restaurant_id !== null && String(req.query.restaurant_id).trim() !== '') {
+      const parsedRestaurantId = Number.parseInt(req.query.restaurant_id, 10);
+      if (!Number.isFinite(parsedRestaurantId) || parsedRestaurantId <= 0) {
+        return res.status(400).json({ error: 'Некорректный restaurant_id' });
+      }
+      restaurantId = parsedRestaurantId;
+    }
+
+    let restaurantMeta = null;
+    if (restaurantId) {
+      const restaurantResult = await pool.query(
+        'SELECT id, name, timezone FROM restaurants WHERE id = $1 LIMIT 1',
+        [restaurantId]
+      );
+      if (!restaurantResult.rows.length) {
+        return res.status(404).json({ error: 'Магазин не найден' });
+      }
+      restaurantMeta = restaurantResult.rows[0];
+    }
+
+    const ordersResult = await pool.query(
+      `
+      SELECT
+        o.id,
+        o.order_number,
+        o.status,
+        o.total_amount,
+        o.payment_method,
+        o.processed_by,
+        o.service_fee,
+        o.delivery_cost,
+        o.service_rating,
+        o.delivery_rating,
+        o.service_rating_reason,
+        o.delivery_rating_reason,
+        COALESCE(
+          NULLIF(BTRIM(to_jsonb(o)->>'fulfillment_type'), ''),
+          CASE
+            WHEN LOWER(COALESCE(o.delivery_address, '')) = 'самовывоз' THEN 'pickup'
+            ELSE 'delivery'
+          END
+        ) AS fulfillment_type,
+        o.delivery_address,
+        o.delivery_coordinates,
+        o.created_at,
+        o.customer_name,
+        o.customer_phone,
+        o.is_paid,
+        o.payment_status,
+        COALESCE(NULLIF(BTRIM(r.name), ''), CONCAT('ID ', o.restaurant_id::text)) AS restaurant_name,
+        COALESCE(NULLIF(BTRIM(r.timezone), ''), 'Asia/Tashkent') AS store_timezone,
+        COALESCE(
+          NULLIF(BTRIM(u_operator.full_name), ''),
+          NULLIF(BTRIM(u_operator.username), ''),
+          CASE WHEN o.processed_by IS NOT NULL THEN CONCAT('ID ', o.processed_by::text) ELSE '' END
+        ) AS processed_by_name,
+        COALESCE(NULLIF(BTRIM(u.phone), ''), NULLIF(BTRIM(o.customer_phone), ''), '') AS customer_phone_normalized,
+        EXISTS(
+          SELECT 1
+          FROM order_status_history osh
+          WHERE osh.order_id = o.id
+            AND osh.status = 'accepted'
+        ) AS has_accepted_action
+      FROM orders o
+      LEFT JOIN restaurants r ON r.id = o.restaurant_id
+      LEFT JOIN users u ON u.id = o.user_id
+      LEFT JOIN users u_operator ON u_operator.id = o.processed_by
+      WHERE o.created_at >= $1::date
+        AND o.created_at < $2::date
+        AND ($3::int IS NULL OR o.restaurant_id = $3)
+      ORDER BY o.created_at ASC, o.id ASC
+      `,
+      [startDateKey, endDateKeyExclusive, restaurantId]
+    );
+
+    const itemsResult = await pool.query(
+      `
+      SELECT
+        o.id AS order_id,
+        o.status,
+        oi.product_name,
+        oi.quantity,
+        oi.price,
+        oi.container_price,
+        oi.container_norm,
+        c.id AS category_id,
+        c.name_ru AS category_name
+      FROM orders o
+      JOIN order_items oi ON oi.order_id = o.id
+      LEFT JOIN products p ON p.id = oi.product_id
+      LEFT JOIN categories c ON c.id = p.category_id
+      WHERE o.created_at >= $1::date
+        AND o.created_at < $2::date
+        AND ($3::int IS NULL OR o.restaurant_id = $3)
+      `,
+      [startDateKey, endDateKeyExclusive, restaurantId]
+    );
+
+    const lowBalanceRestaurantsResult = await pool.query(
+      `
+      SELECT id, name, COALESCE(balance, 0) AS balance, currency_code
+      FROM restaurants
+      WHERE is_active = true
+        AND COALESCE(balance, 0) < 20000
+        AND ($1::int IS NULL OR id = $1)
+      ORDER BY balance ASC, name ASC
+      LIMIT 300
+      `,
+      [restaurantId]
+    );
+
+    const topStoresByOrdersResult = await pool.query(
+      `
+      SELECT
+        r.id,
+        r.name,
+        COUNT(o.id)::int AS orders_count,
+        COALESCE(
+          SUM(
+            CASE
+              WHEN o.status = 'delivered' THEN COALESCE(o.total_amount, 0)
+              ELSE 0
+            END
+          ),
+          0
+        ) AS delivered_revenue
+      FROM restaurants r
+      LEFT JOIN orders o
+        ON o.restaurant_id = r.id
+       AND o.created_at >= $1::date
+       AND o.created_at < $2::date
+      WHERE r.is_active = true
+        AND ($3::int IS NULL OR r.id = $3)
+      GROUP BY r.id, r.name
+      HAVING COUNT(o.id) > 0
+      ORDER BY orders_count DESC, delivered_revenue DESC, r.name ASC
+      LIMIT $4
+      `,
+      [startDateKey, endDateKeyExclusive, restaurantId, topLimit]
+    );
+
+    const topStoresByRevenueResult = await pool.query(
+      `
+      SELECT
+        r.id,
+        r.name,
+        COUNT(o.id)::int AS orders_count,
+        COALESCE(
+          SUM(
+            CASE
+              WHEN o.status = 'delivered' THEN COALESCE(o.total_amount, 0)
+              ELSE 0
+            END
+          ),
+          0
+        ) AS delivered_revenue
+      FROM restaurants r
+      LEFT JOIN orders o
+        ON o.restaurant_id = r.id
+       AND o.created_at >= $1::date
+       AND o.created_at < $2::date
+      WHERE r.is_active = true
+        AND ($3::int IS NULL OR r.id = $3)
+      GROUP BY r.id, r.name
+      HAVING COUNT(o.id) > 0
+      ORDER BY delivered_revenue DESC, orders_count DESC, r.name ASC
+      LIMIT $4
+      `,
+      [startDateKey, endDateKeyExclusive, restaurantId, topLimit]
+    );
+
+    // Top manufacturers by delivered-order sales (revenue = qty * unit price)
+    const topManufacturersResult = await pool.query(
+      `
+      SELECT
+        m.id AS manufacturer_id,
+        m.name AS manufacturer_name,
+        COALESCE(SUM(oi.quantity), 0)::float AS units,
+        COALESCE(SUM(oi.quantity * oi.price), 0)::float AS revenue,
+        COUNT(DISTINCT o.id)::int AS orders_count
+      FROM orders o
+      JOIN order_items oi ON oi.order_id = o.id
+      JOIN products p ON p.id = oi.product_id
+      JOIN manufacturers m ON m.id = p.manufacturer_id
+      WHERE o.created_at >= $1::date
+        AND o.created_at < $2::date
+        AND ($3::int IS NULL OR o.restaurant_id = $3)
+        AND LOWER(o.status) = 'delivered'
+      GROUP BY m.id, m.name
+      ORDER BY revenue DESC, units DESC, m.name ASC
+      LIMIT $4
+      `,
+      [startDateKey, endDateKeyExclusive, restaurantId, topLimit]
+    );
+
+    // Top production countries by delivered-order sales
+    const topCountriesResult = await pool.query(
+      `
+      SELECT
+        BTRIM(p.production_country) AS country,
+        COALESCE(SUM(oi.quantity), 0)::float AS units,
+        COALESCE(SUM(oi.quantity * oi.price), 0)::float AS revenue,
+        COUNT(DISTINCT o.id)::int AS orders_count
+      FROM orders o
+      JOIN order_items oi ON oi.order_id = o.id
+      JOIN products p ON p.id = oi.product_id
+      WHERE o.created_at >= $1::date
+        AND o.created_at < $2::date
+        AND ($3::int IS NULL OR o.restaurant_id = $3)
+        AND LOWER(o.status) = 'delivered'
+        AND p.production_country IS NOT NULL
+        AND BTRIM(p.production_country) <> ''
+      GROUP BY BTRIM(p.production_country)
+      ORDER BY revenue DESC, units DESC, country ASC
+      LIMIT $4
+      `,
+      [startDateKey, endDateKeyExclusive, restaurantId, topLimit]
+    );
+
+    let activityTypeRows = [];
+    try {
+      await ensureActivityTypesSchema().catch(() => {});
+      const activityTypeAnalyticsResult = await pool.query(
+        `
+        SELECT
+          bat.id AS activity_type_id,
+          COALESCE(NULLIF(BTRIM(bat.name), ''), 'Без вида деятельности') AS activity_type_name,
+          COUNT(o.id)::int AS orders_count,
+          COALESCE(
+            SUM(
+              CASE
+                WHEN o.status = 'delivered' THEN COALESCE(o.total_amount, 0)
+                ELSE 0
+              END
+            ),
+            0
+          ) AS delivered_revenue
+        FROM restaurants r
+        LEFT JOIN business_activity_types bat ON bat.id = r.activity_type_id
+        LEFT JOIN orders o
+          ON o.restaurant_id = r.id
+         AND o.created_at >= $1::date
+         AND o.created_at < $2::date
+        WHERE r.is_active = true
+          AND ($3::int IS NULL OR r.id = $3)
+        GROUP BY bat.id, bat.name
+        HAVING COUNT(o.id) > 0
+            OR COALESCE(
+              SUM(
+                CASE
+                  WHEN o.status = 'delivered' THEN COALESCE(o.total_amount, 0)
+                  ELSE 0
+                END
+              ),
+              0
+            ) > 0
+        `,
+        [startDateKey, endDateKeyExclusive, restaurantId]
+      );
+
+      activityTypeRows = activityTypeAnalyticsResult.rows.map((row) => ({
+        activityTypeId: row.activity_type_id ? Number.parseInt(row.activity_type_id, 10) : null,
+        name: row.activity_type_name || 'Без вида деятельности',
+        ordersCount: Number.parseInt(row.orders_count, 10) || 0,
+        revenue: Number(row.delivered_revenue) || 0
+      }));
+    } catch (error) {
+      if (error.code !== '42P01') throw error;
+    }
+
+    const buildTimelinePoints = () => {
+      if (analyticsRange.period === 'yearly') {
+        return Array.from({ length: 12 }, (_, index) => ({ label: String(index + 1), value: 0 }));
+      }
+      if (analyticsRange.period === 'monthly') {
+        const daysInMonth = new Date(analyticsRange.year, analyticsRange.month, 0).getDate();
+        return Array.from({ length: daysInMonth }, (_, index) => ({ label: String(index + 1), value: 0 }));
+      }
+      return Array.from({ length: 24 }, (_, hour) => ({ label: `${String(hour).padStart(2, '0')}:00`, value: 0 }));
+    };
+
+    const revenueTimeline = buildTimelinePoints();
+    const ordersTimeline = buildTimelinePoints();
+    // Hour-of-day activity, aggregated over the whole selected period in each
+    // store's LOCAL time (a store in Seoul and one in Tashkent each land in their
+    // own local hour). Orders = all placed orders; revenue = delivered only.
+    const hourlyOrders = Array.from({ length: 24 }, () => 0);
+    const hourlyRevenue = Array.from({ length: 24 }, () => 0);
+    const statusSummary = {
+      new: 0,
+      accepted: 0,
+      preparing: 0,
+      delivering: 0,
+      delivered: 0,
+      cancelled: 0
+    };
+
+    // Convert a UTC instant to a store's local calendar parts (hour/day/month)
+    // using IANA timezones. Formatters are memoized per timezone.
+    const tzPartsFormatterCache = new Map();
+    const getStoreLocalParts = (dateValue, timeZone) => {
+      const tz = timeZone && String(timeZone).trim() ? String(timeZone).trim() : 'Asia/Tashkent';
+      let formatter = tzPartsFormatterCache.get(tz);
+      if (!formatter) {
+        try {
+          formatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: tz,
+            hour12: false,
+            year: 'numeric',
+            month: 'numeric',
+            day: 'numeric',
+            hour: 'numeric'
+          });
+        } catch (_) {
+          formatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'Asia/Tashkent',
+            hour12: false,
+            year: 'numeric',
+            month: 'numeric',
+            day: 'numeric',
+            hour: 'numeric'
+          });
+        }
+        tzPartsFormatterCache.set(tz, formatter);
+      }
+      const parsed = {};
+      for (const part of formatter.formatToParts(dateValue)) parsed[part.type] = part.value;
+      let hour = Number.parseInt(parsed.hour, 10);
+      if (!Number.isFinite(hour) || hour === 24) hour = 0; // some ICU builds emit "24" at midnight
+      return {
+        hour,
+        day: Number.parseInt(parsed.day, 10) || 1,
+        month: (Number.parseInt(parsed.month, 10) || 1) - 1 // 0-based, like Date#getMonth
+      };
+    };
+    const resolveTimelineIndexFromParts = (parts) => {
+      if (analyticsRange.period === 'yearly') return parts.month;
+      if (analyticsRange.period === 'monthly') return parts.day - 1;
+      return parts.hour;
+    };
+
+    const toNumeric = (value, fallback = 0) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    };
+    const normalizeStatus = (value) => (value === 'in_progress' ? 'preparing' : String(value || '').trim().toLowerCase());
+    const isPickupOrder = (order) => {
+      const fulfillmentType = String(order?.fulfillment_type || '').trim().toLowerCase();
+      if (fulfillmentType === 'pickup') return true;
+      return String(order?.delivery_address || '').trim().toLowerCase() === 'самовывоз';
+    };
+    const parseDeliveryCoordinates = (value) => {
+      const raw = String(value || '').trim();
+      if (!raw) return null;
+      const [latRaw, lngRaw] = raw.split(',').map((part) => String(part || '').trim());
+      if (!latRaw || !lngRaw) return null;
+      const lat = Number.parseFloat(latRaw.replace(',', '.'));
+      const lng = Number.parseFloat(lngRaw.replace(',', '.'));
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+      return { lat, lng };
+    };
+
+    let revenue = 0;
+    let deliveredOrdersCount = 0;
+    let pickupOrdersCount = 0;
+    let deliveryOrdersCount = 0;
+    let deliveryRevenue = 0;
+    let serviceRevenue = 0;
+    let containersRevenue = 0;
+    let serviceRatingSum = 0;
+    let serviceRatingCount = 0;
+    let deliveryRatingSum = 0;
+    let deliveryRatingCount = 0;
+    const buildEmptyOperatorPaymentBuckets = () => OPERATOR_PAYMENT_METHODS.reduce((acc, methodKey) => {
+      acc[methodKey] = { count: 0, amount: 0, percent: 0 };
+      return acc;
+    }, {});
+    const operatorPaymentsByOperatorMap = new Map();
+    const operatorPaymentsTotalsByMethod = buildEmptyOperatorPaymentBuckets();
+    let operatorPaymentsTotalCount = 0;
+    let operatorPaymentsTotalAmount = 0;
+
+    const topCustomersMap = new Map();
+    const orderLocations = [];
+
+    for (const order of ordersResult.rows) {
+      const createdAt = new Date(order.created_at);
+      if (Number.isNaN(createdAt.getTime())) continue;
+
+      const localParts = getStoreLocalParts(createdAt, order.store_timezone);
+      const timelineIndex = resolveTimelineIndexFromParts(localParts);
+      if (timelineIndex >= 0 && timelineIndex < ordersTimeline.length) {
+        ordersTimeline[timelineIndex].value += 1;
+      }
+      if (localParts.hour >= 0 && localParts.hour < 24) {
+        hourlyOrders[localParts.hour] += 1;
+      }
+
+      const normalizedStatus = normalizeStatus(order.status);
+      const isAcceptedInNewState = normalizedStatus === 'new' && (
+        Boolean(order?.has_accepted_action) ||
+        Boolean(order?.is_paid) ||
+        String(order?.payment_status || '').trim().toLowerCase() === 'paid'
+      );
+
+      if (normalizedStatus === 'new') {
+        if (isAcceptedInNewState) statusSummary.accepted += 1;
+        else statusSummary.new += 1;
+      } else if (Object.prototype.hasOwnProperty.call(statusSummary, normalizedStatus)) {
+        statusSummary[normalizedStatus] += 1;
+      }
+
+      serviceRevenue += Math.max(0, toNumeric(order.service_fee, 0));
+
+      if (normalizedStatus !== 'delivered') continue;
+
+      const totalAmount = Math.max(0, toNumeric(order.total_amount, 0));
+      revenue += totalAmount;
+      deliveredOrdersCount += 1;
+      deliveryRevenue += Math.max(0, toNumeric(order.delivery_cost, 0));
+      const serviceRating = normalizeOrderRating(order.service_rating, 0);
+      const deliveryRating = normalizeOrderRating(order.delivery_rating, 0);
+      if (serviceRating > 0) {
+        serviceRatingSum += serviceRating;
+        serviceRatingCount += 1;
+      }
+      if (deliveryRating > 0) {
+        deliveryRatingSum += deliveryRating;
+        deliveryRatingCount += 1;
+      }
+
+      if (timelineIndex >= 0 && timelineIndex < revenueTimeline.length) {
+        revenueTimeline[timelineIndex].value += totalAmount;
+      }
+      if (localParts.hour >= 0 && localParts.hour < 24) {
+        hourlyRevenue[localParts.hour] += totalAmount;
+      }
+
+      if (isPickupOrder(order)) pickupOrdersCount += 1;
+      else deliveryOrdersCount += 1;
+
+      const customerName = String(order.customer_name || '').trim() || 'Клиент';
+      const customerPhone = String(order.customer_phone_normalized || '').trim();
+      const customerKey = `${customerName.toLowerCase()}::${customerPhone.toLowerCase()}`;
+      if (!topCustomersMap.has(customerKey)) {
+        topCustomersMap.set(customerKey, {
+          name: customerName,
+          phone: customerPhone || '—',
+          ordersCount: 0,
+          totalAmount: 0
+        });
+      }
+      const customerEntry = topCustomersMap.get(customerKey);
+      customerEntry.ordersCount += 1;
+      customerEntry.totalAmount += totalAmount;
+
+      const orderLocation = parseDeliveryCoordinates(order.delivery_coordinates);
+      if (orderLocation) {
+        orderLocations.push({
+          orderId: Number.parseInt(order.id, 10) || null,
+          orderNumber: order.order_number || null,
+          lat: orderLocation.lat,
+          lng: orderLocation.lng,
+          totalAmount,
+          createdAt: order.created_at,
+          deliveryAddress: order.delivery_address || '',
+          customerName: String(order.customer_name || '').trim() || 'Клиент',
+          restaurantName: String(order.restaurant_name || '').trim() || 'Магазин'
+        });
+      }
+
+      const normalizedPaymentMethod = String(order.payment_method || '').trim().toLowerCase();
+      if (OPERATOR_PAYMENT_METHODS.includes(normalizedPaymentMethod)) {
+        const rawOperatorId = Number.parseInt(order.processed_by, 10);
+        const operatorId = Number.isFinite(rawOperatorId) && rawOperatorId > 0 ? rawOperatorId : null;
+        const operatorKey = operatorId ? `id:${operatorId}` : 'unassigned';
+        const operatorName = String(order.processed_by_name || '').trim() || 'Без оператора';
+
+        if (!operatorPaymentsByOperatorMap.has(operatorKey)) {
+          operatorPaymentsByOperatorMap.set(operatorKey, {
+            operatorId,
+            operatorName,
+            totalCount: 0,
+            totalAmount: 0,
+            methods: buildEmptyOperatorPaymentBuckets()
+          });
+        }
+
+        const operatorEntry = operatorPaymentsByOperatorMap.get(operatorKey);
+        const methodBucket = operatorEntry.methods[normalizedPaymentMethod];
+        operatorEntry.totalCount += 1;
+        operatorEntry.totalAmount += totalAmount;
+        methodBucket.count += 1;
+        methodBucket.amount += totalAmount;
+
+        operatorPaymentsTotalsByMethod[normalizedPaymentMethod].count += 1;
+        operatorPaymentsTotalsByMethod[normalizedPaymentMethod].amount += totalAmount;
+        operatorPaymentsTotalCount += 1;
+        operatorPaymentsTotalAmount += totalAmount;
+      }
+    }
+
+    let itemsRevenue = 0;
+    const topProductsMap = new Map();
+    const categoriesMap = new Map();
+
+    for (const item of itemsResult.rows) {
+      const quantity = Math.max(0, toNumeric(item.quantity, 0));
+      const price = Math.max(0, toNumeric(item.price, 0));
+      const containerPrice = Math.max(0, toNumeric(item.container_price, 0));
+      const containerNorm = Math.max(1, toNumeric(item.container_norm, 1));
+      if (quantity > 0 && containerPrice > 0) {
+        containersRevenue += Math.ceil(quantity / containerNorm) * containerPrice;
+      }
+
+      const normalizedStatus = normalizeStatus(item.status);
+      if (normalizedStatus !== 'delivered') continue;
+
+      const lineRevenue = quantity * price;
+      itemsRevenue += lineRevenue;
+
+      const productName = String(item.product_name || '').trim() || 'Товар';
+      if (!topProductsMap.has(productName)) {
+        topProductsMap.set(productName, { name: productName, quantity: 0, revenue: 0 });
+      }
+      const productEntry = topProductsMap.get(productName);
+      productEntry.quantity += quantity;
+      productEntry.revenue += lineRevenue;
+
+      const categoryId = Number.parseInt(item.category_id, 10);
+      const categoryKey = Number.isFinite(categoryId) ? `id:${categoryId}` : 'uncategorized';
+      const categoryName = String(item.category_name || '').trim() || 'Без категории';
+      if (!categoriesMap.has(categoryKey)) {
+        categoriesMap.set(categoryKey, {
+          categoryId: Number.isFinite(categoryId) ? categoryId : null,
+          name: categoryName,
+          quantity: 0,
+          revenue: 0
+        });
+      }
+      const categoryEntry = categoriesMap.get(categoryKey);
+      categoryEntry.quantity += quantity;
+      categoryEntry.revenue += lineRevenue;
+    }
+
+    const topProducts = Array.from(topProductsMap.values())
+      .sort((a, b) => {
+        if (b.quantity !== a.quantity) return b.quantity - a.quantity;
+        return b.revenue - a.revenue;
+      })
+      .slice(0, 10);
+
+    const topCustomers = Array.from(topCustomersMap.values())
+      .sort((a, b) => {
+        if (b.ordersCount !== a.ordersCount) return b.ordersCount - a.ordersCount;
+        return b.totalAmount - a.totalAmount;
+      })
+      .slice(0, 10);
+
+    const categoryRows = Array.from(categoriesMap.values());
+    const categoriesByQuantity = [...categoryRows]
+      .sort((a, b) => {
+        if (b.quantity !== a.quantity) return b.quantity - a.quantity;
+        return b.revenue - a.revenue;
+      })
+      .slice(0, 10);
+    const categoriesByRevenue = [...categoryRows]
+      .sort((a, b) => {
+        if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+        return b.quantity - a.quantity;
+      })
+      .slice(0, 10);
+    const activityTypesByQuantity = [...activityTypeRows]
+      .sort((a, b) => {
+        if (b.ordersCount !== a.ordersCount) return b.ordersCount - a.ordersCount;
+        return b.revenue - a.revenue;
+      })
+      .slice(0, topLimit);
+    const activityTypesByRevenue = [...activityTypeRows]
+      .sort((a, b) => {
+        if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+        return b.ordersCount - a.ordersCount;
+      })
+      .slice(0, topLimit);
+    const operatorPaymentRows = Array.from(operatorPaymentsByOperatorMap.values())
+      .map((row) => ({
+        operatorId: row.operatorId,
+        operatorName: row.operatorName,
+        totalCount: Number.parseInt(row.totalCount, 10) || 0,
+        totalAmount: Number(row.totalAmount) || 0,
+        methods: OPERATOR_PAYMENT_METHODS.reduce((acc, methodKey) => {
+          const bucket = row.methods?.[methodKey] || { count: 0, amount: 0 };
+          const count = Number.parseInt(bucket.count, 10) || 0;
+          acc[methodKey] = {
+            count,
+            amount: Number(bucket.amount) || 0,
+            percent: ratioPercent(count, row.totalCount)
+          };
+          return acc;
+        }, {})
+      }))
+      .sort((a, b) => {
+        if (b.totalCount !== a.totalCount) return b.totalCount - a.totalCount;
+        if (b.totalAmount !== a.totalAmount) return b.totalAmount - a.totalAmount;
+        return String(a.operatorName || '').localeCompare(String(b.operatorName || ''), 'ru');
+      });
+    const operatorPaymentTotals = OPERATOR_PAYMENT_METHODS.reduce((acc, methodKey) => {
+      const bucket = operatorPaymentsTotalsByMethod[methodKey] || { count: 0, amount: 0 };
+      const count = Number.parseInt(bucket.count, 10) || 0;
+      acc[methodKey] = {
+        count,
+        amount: Number(bucket.amount) || 0,
+        percent: ratioPercent(count, operatorPaymentsTotalCount)
+      };
+      return acc;
+    }, {});
+
+    const averageCheck = deliveredOrdersCount > 0 ? Math.round(revenue / deliveredOrdersCount) : 0;
+    const serviceRatingAvg = serviceRatingCount > 0
+      ? Math.round((serviceRatingSum / serviceRatingCount) * 100) / 100
+      : 0;
+    const deliveryRatingAvg = deliveryRatingCount > 0
+      ? Math.round((deliveryRatingSum / deliveryRatingCount) * 100) / 100
+      : 0;
+
+    await ensureBotFunnelSchema().catch(() => {});
+
+    let botFunnelRow = null;
+    try {
+      const botFunnelResult = await pool.query(
+        `
+        WITH events AS (
+          SELECT
+            user_telegram_id::text AS tg,
+            event_type
+          FROM bot_funnel_events
+          WHERE user_telegram_id IS NOT NULL
+            AND created_at >= $1::date
+            AND created_at < $2::date
+            AND ($3::int IS NULL OR restaurant_id = $3)
+        ),
+        started AS (
+          SELECT DISTINCT tg FROM events WHERE event_type = 'start'
+        ),
+        language_selected AS (
+          SELECT DISTINCT tg FROM events WHERE event_type = 'language_selected'
+        ),
+        contact_shared AS (
+          SELECT DISTINCT tg FROM events WHERE event_type = 'contact_shared'
+        ),
+        registration_events AS (
+          SELECT DISTINCT tg FROM events WHERE event_type = 'registration_completed'
+        ),
+        period_order_users AS (
+          SELECT DISTINCT u.telegram_id::text AS tg
+          FROM orders o
+          JOIN users u ON u.id = o.user_id
+          WHERE o.created_at >= $1::date
+            AND o.created_at < $2::date
+            AND u.telegram_id IS NOT NULL
+            AND ($3::int IS NULL OR o.restaurant_id = $3)
+        ),
+        registered_users_from_db AS (
+          SELECT DISTINCT u.telegram_id::text AS tg
+          FROM users u
+          WHERE u.role = 'customer'
+            AND u.telegram_id IS NOT NULL
+            AND u.created_at >= $1::date
+            AND u.created_at < $2::date
+            AND (
+              $3::int IS NULL
+              OR EXISTS (
+                SELECT 1
+                FROM user_restaurants ur
+                WHERE ur.user_id = u.id
+                  AND ur.restaurant_id = $3
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM orders o_hist
+                WHERE o_hist.user_id = u.id
+                  AND o_hist.restaurant_id = $3
+              )
+            )
+        ),
+        registration_completed AS (
+          SELECT tg FROM registration_events
+          UNION
+          SELECT tg FROM registered_users_from_db
+        )
+        SELECT
+          (SELECT COUNT(*)::int FROM started) AS started_users,
+          (SELECT COUNT(*)::int FROM started s JOIN language_selected l ON l.tg = s.tg) AS language_selected_users,
+          (SELECT COUNT(*)::int FROM started s JOIN contact_shared c ON c.tg = s.tg) AS contact_shared_users,
+          (SELECT COUNT(*)::int FROM started s JOIN registration_completed r ON r.tg = s.tg) AS registration_completed_users,
+          (SELECT COUNT(*)::int FROM registered_users_from_db) AS registered_users_from_db,
+          (SELECT COUNT(*)::int FROM period_order_users) AS order_users_total,
+          (SELECT COUNT(*)::int FROM started s JOIN period_order_users d ON d.tg = s.tg) AS started_with_order_users,
+          (SELECT COUNT(*)::int FROM started s JOIN registration_completed r ON r.tg = s.tg JOIN period_order_users d ON d.tg = s.tg) AS registered_with_order_users
+        `,
+        [startDateKey, endDateKeyExclusive, restaurantId]
+      );
+      botFunnelRow = botFunnelResult.rows[0] || null;
+    } catch (error) {
+      if (error.code !== '42P01') throw error;
+    }
+
+    const toInt = (value) => {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+
+    const startedUsers = toInt(botFunnelRow?.started_users);
+    const languageSelectedUsers = toInt(botFunnelRow?.language_selected_users);
+    const contactSharedUsers = toInt(botFunnelRow?.contact_shared_users);
+    const registrationCompletedUsers = toInt(botFunnelRow?.registration_completed_users);
+    const registeredUsersFromDb = toInt(botFunnelRow?.registered_users_from_db);
+    const startedWithOrderUsers = toInt(botFunnelRow?.started_with_order_users);
+    const registeredWithOrderUsers = toInt(botFunnelRow?.registered_with_order_users);
+    const orderUsersTotal = toInt(botFunnelRow?.order_users_total);
+
+    res.json({
+      period: analyticsRange.period,
+      date: analyticsRange.dateKey,
+      startDate: startDateKey,
+      endDateExclusive: endDateKeyExclusive,
+      year: analyticsRange.year,
+      month: analyticsRange.month,
+      timezone: ANALYTICS_TIMEZONE,
+      restaurant: restaurantMeta,
+      kpis: {
+        revenue,
+        ordersCount: deliveredOrdersCount,
+        averageCheck,
+        pickupOrdersCount,
+        deliveryOrdersCount,
+        itemsRevenue,
+        deliveryRevenue,
+        serviceRevenue,
+        containersRevenue,
+        serviceRatingAvg,
+        deliveryRatingAvg,
+        serviceRatingCount,
+        deliveryRatingCount
+      },
+      statusSummary,
+      timelines: {
+        revenue: revenueTimeline,
+        orders: ordersTimeline,
+        hourly: Array.from({ length: 24 }, (_, hour) => ({
+          label: `${String(hour).padStart(2, '0')}:00`,
+          ordersCount: hourlyOrders[hour],
+          revenue: hourlyRevenue[hour]
+        }))
+      },
+      analyticsTimezone: restaurantMeta
+        ? (restaurantMeta.timezone && String(restaurantMeta.timezone).trim() ? String(restaurantMeta.timezone).trim() : 'Asia/Tashkent')
+        : null,
+      orderLocations,
+      topProducts,
+      topCustomers,
+      categories: {
+        byQuantity: categoriesByQuantity,
+        byRevenue: categoriesByRevenue
+      },
+      activityTypes: {
+        byQuantity: activityTypesByQuantity,
+        byRevenue: activityTypesByRevenue
+      },
+      topManufacturers: topManufacturersResult.rows.map((row) => ({
+        id: row.manufacturer_id,
+        name: row.manufacturer_name,
+        units: Number(row.units) || 0,
+        revenue: Number(row.revenue) || 0,
+        ordersCount: Number.parseInt(row.orders_count, 10) || 0
+      })),
+      topCountries: topCountriesResult.rows.map((row) => ({
+        country: row.country,
+        units: Number(row.units) || 0,
+        revenue: Number(row.revenue) || 0,
+        ordersCount: Number.parseInt(row.orders_count, 10) || 0
+      })),
+      operatorPayments: {
+        paymentMethods: OPERATOR_PAYMENT_METHODS.map((methodKey) => ({
+          key: methodKey,
+          label: OPERATOR_PAYMENT_LABELS[methodKey] || methodKey
+        })),
+        totalCount: operatorPaymentsTotalCount,
+        totalAmount: operatorPaymentsTotalAmount,
+        operators: operatorPaymentRows,
+        totalsByMethod: operatorPaymentTotals
+      },
+      shops: {
+        topLimit,
+        lowBalance: lowBalanceRestaurantsResult.rows.map((row) => ({
+          id: row.id,
+          name: row.name,
+          balance: Number(row.balance) || 0
+        })),
+        topByOrders: topStoresByOrdersResult.rows.map((row) => ({
+          id: row.id,
+          name: row.name,
+          ordersCount: Number.parseInt(row.orders_count, 10) || 0,
+          revenue: Number(row.delivered_revenue) || 0
+        })),
+        topByRevenue: topStoresByRevenueResult.rows.map((row) => ({
+          id: row.id,
+          name: row.name,
+          ordersCount: Number.parseInt(row.orders_count, 10) || 0,
+          revenue: Number(row.delivered_revenue) || 0
+        }))
+      },
+      funnel: {
+        startedUsers,
+        languageSelectedUsers,
+        contactSharedUsers,
+        registrationCompletedUsers,
+        registeredUsersFromDb,
+        startedWithOrderUsers,
+        registeredWithOrderUsers,
+        orderUsersTotal,
+        noLanguageAfterStart: Math.max(0, startedUsers - languageSelectedUsers),
+        noPhoneAfterLanguage: Math.max(0, languageSelectedUsers - contactSharedUsers),
+        noOrderAfterRegistration: Math.max(0, registrationCompletedUsers - registeredWithOrderUsers),
+        conversionStartToRegistration: ratioPercent(registrationCompletedUsers, startedUsers),
+        conversionStartToOrder: ratioPercent(startedWithOrderUsers, startedUsers),
+        conversionRegistrationToOrder: ratioPercent(registeredWithOrderUsers, registrationCompletedUsers)
+      }
+    });
+  } catch (error) {
+    console.error('Superadmin analytics overview error:', error);
+    res.status(500).json({ error: 'Ошибка получения аналитики' });
+  }
+});
+
+router.get('/analytics/product-reviews', async (req, res) => {
+  try {
+    const analyticsRange = resolveAnalyticsRange(req.query || {});
+    const requestedCommentsLimit = Number.parseInt(req.query.limit, 10);
+    const commentsLimit = Number.isFinite(requestedCommentsLimit)
+      ? Math.min(Math.max(requestedCommentsLimit, 1), 100)
+      : 30;
+    const requestedTopLimit = Number.parseInt(req.query.top_limit, 10);
+    const topLimit = Number.isFinite(requestedTopLimit)
+      ? Math.min(Math.max(requestedTopLimit, 1), 30)
+      : 10;
+
+    let restaurantId = null;
+    if (req.query.restaurant_id !== undefined && req.query.restaurant_id !== null && String(req.query.restaurant_id).trim() !== '') {
+      const parsedRestaurantId = Number.parseInt(req.query.restaurant_id, 10);
+      if (!Number.isFinite(parsedRestaurantId) || parsedRestaurantId <= 0) {
+        return res.status(400).json({ error: 'Некорректный restaurant_id' });
+      }
+      restaurantId = parsedRestaurantId;
+      const restaurantResult = await pool.query('SELECT id FROM restaurants WHERE id = $1 LIMIT 1', [restaurantId]);
+      if (!restaurantResult.rows.length) {
+        return res.status(404).json({ error: 'Магазин не найден' });
+      }
+    }
+
+    await ensureProductReviewsSchema().catch(() => {});
+
+    const baseParams = [restaurantId, analyticsRange.startDateKey, analyticsRange.endDateKeyExclusive];
+    let summaryRow = {
+      total_reviews: 0,
+      comments_count: 0,
+      low_rating_count: 0,
+      average_rating: 0,
+      rating_1_count: 0,
+      rating_2_count: 0,
+      rating_3_count: 0,
+      rating_4_count: 0,
+      rating_5_count: 0
+    };
+    let latestComments = [];
+    let topProducts = [];
+
+    try {
+      const [summaryResult, latestCommentsResult, topProductsResult] = await Promise.all([
+        pool.query(
+          `
+          SELECT
+            COUNT(*)::int AS total_reviews,
+            COUNT(*) FILTER (WHERE NULLIF(BTRIM(COALESCE(pr.comment, '')), '') IS NOT NULL)::int AS comments_count,
+            COUNT(*) FILTER (WHERE pr.rating <= 2)::int AS low_rating_count,
+            ROUND(COALESCE(AVG(pr.rating)::numeric, 0), 2)::float AS average_rating,
+            COUNT(*) FILTER (WHERE pr.rating = 1)::int AS rating_1_count,
+            COUNT(*) FILTER (WHERE pr.rating = 2)::int AS rating_2_count,
+            COUNT(*) FILTER (WHERE pr.rating = 3)::int AS rating_3_count,
+            COUNT(*) FILTER (WHERE pr.rating = 4)::int AS rating_4_count,
+            COUNT(*) FILTER (WHERE pr.rating = 5)::int AS rating_5_count
+          FROM product_reviews pr
+          JOIN products p ON p.id = pr.product_id
+          WHERE ($1::int IS NULL OR p.restaurant_id = $1)
+            AND pr.is_deleted = false
+            AND pr.created_at >= $2::date
+            AND pr.created_at < $3::date
+          `,
+          baseParams
+        ),
+        pool.query(
+          `
+          SELECT
+            pr.id,
+            pr.product_id,
+            COALESCE(NULLIF(BTRIM(p.name_ru), ''), NULLIF(BTRIM(p.name_uz), ''), CONCAT('#', p.id::text)) AS product_name,
+            p.restaurant_id,
+            COALESCE(NULLIF(BTRIM(r.name), ''), CONCAT('ID ', p.restaurant_id::text)) AS restaurant_name,
+            pr.rating,
+            pr.comment,
+            pr.created_at,
+            pr.user_id,
+            COALESCE(NULLIF(BTRIM(u.full_name), ''), NULLIF(BTRIM(u.username), ''), 'Клиент') AS author_name
+          FROM product_reviews pr
+          JOIN products p ON p.id = pr.product_id
+          LEFT JOIN restaurants r ON r.id = p.restaurant_id
+          LEFT JOIN users u ON u.id = pr.user_id
+          WHERE ($1::int IS NULL OR p.restaurant_id = $1)
+            AND pr.is_deleted = false
+            AND pr.created_at >= $2::date
+            AND pr.created_at < $3::date
+            AND NULLIF(BTRIM(COALESCE(pr.comment, '')), '') IS NOT NULL
+          ORDER BY pr.created_at DESC, pr.id DESC
+          LIMIT $4
+          `,
+          [...baseParams, commentsLimit]
+        ),
+        pool.query(
+          `
+          SELECT
+            pr.product_id,
+            COALESCE(NULLIF(BTRIM(p.name_ru), ''), NULLIF(BTRIM(p.name_uz), ''), CONCAT('#', p.id::text)) AS product_name,
+            p.restaurant_id,
+            COALESCE(NULLIF(BTRIM(r.name), ''), CONCAT('ID ', p.restaurant_id::text)) AS restaurant_name,
+            COUNT(*)::int AS total_reviews,
+            COUNT(*) FILTER (WHERE NULLIF(BTRIM(COALESCE(pr.comment, '')), '') IS NOT NULL)::int AS comments_count,
+            ROUND(COALESCE(AVG(pr.rating)::numeric, 0), 2)::float AS average_rating
+          FROM product_reviews pr
+          JOIN products p ON p.id = pr.product_id
+          LEFT JOIN restaurants r ON r.id = p.restaurant_id
+          WHERE ($1::int IS NULL OR p.restaurant_id = $1)
+            AND pr.is_deleted = false
+            AND pr.created_at >= $2::date
+            AND pr.created_at < $3::date
+          GROUP BY pr.product_id, p.id, p.name_ru, p.name_uz, p.restaurant_id, r.name
+          ORDER BY comments_count DESC, total_reviews DESC, average_rating DESC
+          LIMIT $4
+          `,
+          [...baseParams, topLimit]
+        )
+      ]);
+
+      summaryRow = summaryResult.rows?.[0] || summaryRow;
+      latestComments = latestCommentsResult.rows || [];
+      topProducts = topProductsResult.rows || [];
+    } catch (error) {
+      if (error.code !== '42P01') throw error;
+    }
+
+    res.json({
+      period: analyticsRange.period,
+      date: analyticsRange.dateKey,
+      startDate: analyticsRange.startDateKey,
+      endDateExclusive: analyticsRange.endDateKeyExclusive,
+      year: analyticsRange.year,
+      month: analyticsRange.month,
+      timezone: ANALYTICS_TIMEZONE,
+      restaurantId,
+      summary: {
+        totalReviews: Number.parseInt(summaryRow.total_reviews, 10) || 0,
+        commentsCount: Number.parseInt(summaryRow.comments_count, 10) || 0,
+        lowRatingCount: Number.parseInt(summaryRow.low_rating_count, 10) || 0,
+        averageRating: Number(summaryRow.average_rating || 0),
+        ratingBreakdown: {
+          1: Number.parseInt(summaryRow.rating_1_count, 10) || 0,
+          2: Number.parseInt(summaryRow.rating_2_count, 10) || 0,
+          3: Number.parseInt(summaryRow.rating_3_count, 10) || 0,
+          4: Number.parseInt(summaryRow.rating_4_count, 10) || 0,
+          5: Number.parseInt(summaryRow.rating_5_count, 10) || 0
+        }
+      },
+      latestComments: latestComments.map((row) => ({
+        id: Number.parseInt(row.id, 10) || 0,
+        productId: Number.parseInt(row.product_id, 10) || 0,
+        productName: row.product_name || 'Товар',
+        restaurantId: Number.parseInt(row.restaurant_id, 10) || null,
+        restaurantName: row.restaurant_name || '—',
+        rating: Number.parseInt(row.rating, 10) || 0,
+        comment: row.comment || '',
+        createdAt: row.created_at || null,
+        userId: Number.parseInt(row.user_id, 10) || null,
+        authorName: row.author_name || 'Клиент'
+      })),
+      topProducts: topProducts.map((row) => ({
+        productId: Number.parseInt(row.product_id, 10) || 0,
+        productName: row.product_name || 'Товар',
+        restaurantId: Number.parseInt(row.restaurant_id, 10) || null,
+        restaurantName: row.restaurant_name || '—',
+        totalReviews: Number.parseInt(row.total_reviews, 10) || 0,
+        commentsCount: Number.parseInt(row.comments_count, 10) || 0,
+        averageRating: Number(row.average_rating || 0)
+      }))
+    });
+  } catch (error) {
+    console.error('Superadmin product review analytics error:', error);
+    res.status(500).json({ error: 'Ошибка получения аналитики отзывов' });
+  }
+});
+
+// =====================================================
+// GLOBAL ADS (SUPERADMIN ONLY)
+// =====================================================
+
+const mapAdBannerRow = (row) => {
+  const repeatDays = Array.isArray(row.repeat_days) ? row.repeat_days : normalizeAdRepeatDays(row.repeat_days);
+  const targetActivityTypeIds = Array.isArray(row.target_activity_type_ids)
+    ? normalizeAdTargetActivityTypeIds(row.target_activity_type_ids)
+    : normalizeAdTargetActivityTypeIds(row.target_activity_type_ids);
+  const adType = AD_BANNER_TYPES.has(String(row.ad_type || '').trim().toLowerCase())
+    ? String(row.ad_type).trim().toLowerCase()
+    : 'banner';
+  const banner = { ...row, ad_type: adType, repeat_days: repeatDays, target_activity_type_ids: targetActivityTypeIds };
+  return {
+    ...banner,
+    is_visible_now: isAdBannerVisibleNow(banner),
+    runtime_status: getAdBannerStatus(banner)
+  };
+};
+
+const parseAdAnalyticsDays = (value) => {
+  if (value === 'all') return null;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed)) return 30;
+  return Math.min(Math.max(parsed, 1), 365);
+};
+
+const buildAdAnalyticsWhere = ({ bannerId, days }) => {
+  const params = [bannerId];
+  let sql = `
+    e.banner_id = $1
+  `;
+  if (days) {
+    params.push(days);
+    sql += ` AND e.created_at >= (NOW() - ($2::int * INTERVAL '1 day'))`;
+  }
+  return { sql, params };
+};
+
+const mapPgInt = (value) => Number.parseInt(value, 10) || 0;
+
+// ===== Manufacturers (global catalog) =====
+const normalizeManufacturerName = (value) => String(value ?? '').trim().slice(0, 160);
+const normalizeManufacturerLogo = (value) => {
+  const url = String(value ?? '').trim();
+  return url ? url.slice(0, 2000) : null;
+};
+
+router.get('/manufacturers', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT m.*, COALESCE(p.products_count, 0)::int AS products_count
+      FROM manufacturers m
+      LEFT JOIN (
+        SELECT manufacturer_id, COUNT(*) AS products_count
+        FROM products
+        WHERE manufacturer_id IS NOT NULL
+        GROUP BY manufacturer_id
+      ) p ON p.manufacturer_id = m.id
+      ORDER BY m.name ASC
+    `);
+    res.json({ items: result.rows });
+  } catch (error) {
+    console.error('Get manufacturers error:', error);
+    res.status(500).json({ error: 'Ошибка получения производителей' });
+  }
+});
+
+router.post('/manufacturers', async (req, res) => {
+  try {
+    const name = normalizeManufacturerName(req.body?.name);
+    if (!name) {
+      return res.status(400).json({ error: 'Укажите название производителя' });
+    }
+    const logoUrl = normalizeManufacturerLogo(req.body?.logo_url);
+    const isActive = req.body?.is_active === undefined ? true : !!req.body.is_active;
+
+    const dup = await pool.query('SELECT id FROM manufacturers WHERE LOWER(name) = LOWER($1) LIMIT 1', [name]);
+    if (dup.rows.length > 0) {
+      return res.status(409).json({ error: 'Производитель с таким названием уже существует' });
+    }
+
+    const result = await pool.query(`
+      INSERT INTO manufacturers (name, logo_url, is_active, created_by, updated_by)
+      VALUES ($1, $2, $3, $4, $4)
+      RETURNING *
+    `, [name, logoUrl, isActive, req.user.id]);
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Create manufacturer error:', error);
+    res.status(500).json({ error: 'Ошибка создания производителя' });
+  }
+});
+
+router.put('/manufacturers/:id', async (req, res) => {
+  try {
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ error: 'Некорректный ID' });
+    }
+    const existing = await pool.query('SELECT * FROM manufacturers WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Производитель не найден' });
+    }
+
+    const hasName = Object.prototype.hasOwnProperty.call(req.body || {}, 'name');
+    const name = hasName ? normalizeManufacturerName(req.body.name) : existing.rows[0].name;
+    if (hasName && !name) {
+      return res.status(400).json({ error: 'Укажите название производителя' });
+    }
+    const logoUrl = Object.prototype.hasOwnProperty.call(req.body || {}, 'logo_url')
+      ? normalizeManufacturerLogo(req.body.logo_url)
+      : existing.rows[0].logo_url;
+    const isActive = Object.prototype.hasOwnProperty.call(req.body || {}, 'is_active')
+      ? !!req.body.is_active
+      : existing.rows[0].is_active;
+
+    if (hasName && name.toLowerCase() !== String(existing.rows[0].name || '').toLowerCase()) {
+      const dup = await pool.query('SELECT id FROM manufacturers WHERE LOWER(name) = LOWER($1) AND id <> $2 LIMIT 1', [name, id]);
+      if (dup.rows.length > 0) {
+        return res.status(409).json({ error: 'Производитель с таким названием уже существует' });
+      }
+    }
+
+    const result = await pool.query(`
+      UPDATE manufacturers
+      SET name = $1, logo_url = $2, is_active = $3, updated_by = $4, updated_at = CURRENT_TIMESTAMP
+      WHERE id = $5
+      RETURNING *
+    `, [name, logoUrl, isActive, req.user.id, id]);
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Update manufacturer error:', error);
+    res.status(500).json({ error: 'Ошибка обновления производителя' });
+  }
+});
+
+router.delete('/manufacturers/:id', async (req, res) => {
+  try {
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ error: 'Некорректный ID' });
+    }
+    const result = await pool.query('DELETE FROM manufacturers WHERE id = $1 RETURNING id', [id]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Производитель не найден' });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete manufacturer error:', error);
+    res.status(500).json({ error: 'Ошибка удаления производителя' });
+  }
+});
+
+router.get('/ads/banners', async (req, res) => {
+  try {
+    await ensureActivityTypesSchema();
+    const { status = 'all', include_deleted = 'false' } = req.query;
+    const includeDeleted = include_deleted === 'true';
+
+    const result = await pool.query(`
+      SELECT
+        b.*,
+        cu.username AS created_by_username,
+        uu.username AS updated_by_username,
+        COALESCE(stats.total_views, 0)::int AS total_views,
+        COALESCE(stats.unique_views, 0)::int AS unique_views,
+        COALESCE(stats.total_clicks, 0)::int AS total_clicks,
+        stats.last_view_at,
+        stats.last_click_at
+      FROM ad_banners b
+      LEFT JOIN users cu ON cu.id = b.created_by
+      LEFT JOIN users uu ON uu.id = b.updated_by
+      LEFT JOIN (
+        SELECT
+          e.banner_id,
+          COUNT(*) FILTER (WHERE e.event_type = 'view') AS total_views,
+          COUNT(*) FILTER (WHERE e.event_type = 'click') AS total_clicks,
+          COUNT(DISTINCT CASE
+            WHEN e.event_type = 'view' THEN COALESCE(e.user_id::text, NULLIF(e.viewer_key, ''), NULLIF(e.ip_address, ''))
+            ELSE NULL
+          END) AS unique_views,
+          MAX(e.created_at) FILTER (WHERE e.event_type = 'view') AS last_view_at,
+          MAX(e.created_at) FILTER (WHERE e.event_type = 'click') AS last_click_at
+        FROM ad_banner_events e
+        GROUP BY e.banner_id
+      ) stats ON stats.banner_id = b.id
+      WHERE ($1::boolean = true OR b.is_deleted = false)
+      ORDER BY b.slot_order ASC, b.created_at DESC
+    `, [includeDeleted]);
+
+    const allRows = result.rows.map(mapAdBannerRow);
+    let rows = allRows;
+    if (status !== 'all') {
+      rows = rows.filter((row) => row.runtime_status === status);
+    }
+
+    const activeNowCount = allRows.filter((row) => row.is_visible_now).length;
+    res.json({
+      items: rows,
+      max_slots: AD_BANNER_MAX_SLOTS,
+      active_now_count: activeNowCount
+    });
+  } catch (error) {
+    console.error('Get ad banners error:', error);
+    res.status(500).json({ error: 'Ошибка получения рекламных баннеров' });
+  }
+});
+
+router.get('/ads/banners/:id/analytics', async (req, res) => {
+  try {
+    const bannerId = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(bannerId)) {
+      return res.status(400).json({ error: 'Некорректный ID баннера' });
+    }
+
+    const days = parseAdAnalyticsDays(req.query.days);
+
+    const bannerResult = await pool.query(
+      `SELECT b.*, cu.username AS created_by_username, uu.username AS updated_by_username
+       FROM ad_banners b
+       LEFT JOIN users cu ON cu.id = b.created_by
+       LEFT JOIN users uu ON uu.id = b.updated_by
+       WHERE b.id = $1`,
+      [bannerId]
+    );
+
+    if (!bannerResult.rows.length) {
+      return res.status(404).json({ error: 'Баннер не найден' });
+    }
+
+    const banner = mapAdBannerRow(bannerResult.rows[0]);
+    const where = buildAdAnalyticsWhere({ bannerId, days });
+    const uniqueViewerExpr = `COALESCE(e.user_id::text, NULLIF(e.viewer_key, ''), NULLIF(e.ip_address, ''))`;
+
+    const overviewResult = await pool.query(
+      `
+      SELECT
+        COUNT(*) FILTER (WHERE e.event_type = 'view')::int AS total_views,
+        COUNT(*) FILTER (WHERE e.event_type = 'click')::int AS total_clicks,
+        COUNT(DISTINCT CASE WHEN e.event_type = 'view' THEN ${uniqueViewerExpr} ELSE NULL END)::int AS unique_views,
+        COUNT(DISTINCT CASE WHEN e.event_type = 'click' THEN ${uniqueViewerExpr} ELSE NULL END)::int AS unique_clicks,
+        MAX(e.created_at) FILTER (WHERE e.event_type = 'view') AS last_view_at,
+        MAX(e.created_at) FILTER (WHERE e.event_type = 'click') AS last_click_at
+      FROM ad_banner_events e
+      WHERE ${where.sql}
+      `,
+      where.params
+    );
+
+    const dailyResult = await pool.query(
+      `
+      SELECT
+        DATE_TRUNC('day', e.created_at) AS day,
+        COUNT(*) FILTER (WHERE e.event_type = 'view')::int AS views,
+        COUNT(*) FILTER (WHERE e.event_type = 'click')::int AS clicks,
+        COUNT(DISTINCT CASE WHEN e.event_type = 'view' THEN ${uniqueViewerExpr} ELSE NULL END)::int AS unique_views
+      FROM ad_banner_events e
+      WHERE ${where.sql}
+      GROUP BY DATE_TRUNC('day', e.created_at)
+      ORDER BY day DESC
+      LIMIT 90
+      `,
+      where.params
+    );
+
+    const browserStatsResult = await pool.query(
+      `
+      SELECT
+        COALESCE(NULLIF(e.browser_name, ''), 'Unknown') AS browser_name,
+        NULLIF(e.browser_version, '') AS browser_version,
+        NULLIF(e.app_container, '') AS app_container,
+        COALESCE(e.is_in_app_browser, false) AS is_in_app_browser,
+        COUNT(*) FILTER (WHERE e.event_type = 'view')::int AS views,
+        COUNT(*) FILTER (WHERE e.event_type = 'click')::int AS clicks,
+        COUNT(DISTINCT CASE WHEN e.event_type = 'view' THEN ${uniqueViewerExpr} ELSE NULL END)::int AS unique_views
+      FROM ad_banner_events e
+      WHERE ${where.sql}
+      GROUP BY 1,2,3,4
+      HAVING COUNT(*) FILTER (WHERE e.event_type IN ('view','click')) > 0
+      ORDER BY views DESC, clicks DESC, browser_name ASC
+      LIMIT 20
+      `,
+      where.params
+    );
+
+    const deviceStatsResult = await pool.query(
+      `
+      SELECT
+        COALESCE(NULLIF(e.device_type, ''), 'desktop') AS device_type,
+        NULLIF(e.device_brand, '') AS device_brand,
+        NULLIF(e.device_model, '') AS device_model,
+        COALESCE(NULLIF(e.os_name, ''), 'Unknown') AS os_name,
+        NULLIF(e.os_version, '') AS os_version,
+        COUNT(*) FILTER (WHERE e.event_type = 'view')::int AS views,
+        COUNT(*) FILTER (WHERE e.event_type = 'click')::int AS clicks,
+        COUNT(DISTINCT CASE WHEN e.event_type = 'view' THEN ${uniqueViewerExpr} ELSE NULL END)::int AS unique_views
+      FROM ad_banner_events e
+      WHERE ${where.sql}
+      GROUP BY 1,2,3,4,5
+      HAVING COUNT(*) FILTER (WHERE e.event_type IN ('view','click')) > 0
+      ORDER BY views DESC, clicks DESC
+      LIMIT 20
+      `,
+      where.params
+    );
+
+    const countryStatsResult = await pool.query(
+      `
+      SELECT
+        COALESCE(NULLIF(e.country, ''), 'Unknown') AS country,
+        COUNT(*) FILTER (WHERE e.event_type = 'view')::int AS views,
+        COUNT(*) FILTER (WHERE e.event_type = 'click')::int AS clicks,
+        COUNT(DISTINCT CASE WHEN e.event_type = 'view' THEN ${uniqueViewerExpr} ELSE NULL END)::int AS unique_views
+      FROM ad_banner_events e
+      WHERE ${where.sql}
+      GROUP BY 1
+      HAVING COUNT(*) FILTER (WHERE e.event_type IN ('view','click')) > 0
+      ORDER BY views DESC, clicks DESC
+      LIMIT 15
+      `,
+      where.params
+    );
+
+    const cityStatsResult = await pool.query(
+      `
+      SELECT
+        COALESCE(NULLIF(e.country, ''), 'Unknown') AS country,
+        COALESCE(NULLIF(e.region, ''), 'Unknown') AS region,
+        COALESCE(NULLIF(e.city, ''), 'Unknown') AS city,
+        COUNT(*) FILTER (WHERE e.event_type = 'view')::int AS views,
+        COUNT(*) FILTER (WHERE e.event_type = 'click')::int AS clicks,
+        COUNT(DISTINCT CASE WHEN e.event_type = 'view' THEN ${uniqueViewerExpr} ELSE NULL END)::int AS unique_views
+      FROM ad_banner_events e
+      WHERE ${where.sql}
+      GROUP BY 1,2,3
+      HAVING COUNT(*) FILTER (WHERE e.event_type IN ('view','click')) > 0
+      ORDER BY views DESC, clicks DESC
+      LIMIT 20
+      `,
+      where.params
+    );
+
+    const overviewRow = overviewResult.rows[0] || {};
+    const totalViews = mapPgInt(overviewRow.total_views);
+    const totalClicks = mapPgInt(overviewRow.total_clicks);
+    const uniqueViews = mapPgInt(overviewRow.unique_views);
+    const ctr = totalViews > 0 ? Number(((totalClicks / totalViews) * 100).toFixed(2)) : 0;
+
+    res.json({
+      banner,
+      range: {
+        days: days || 'all'
+      },
+      overview: {
+        total_views: totalViews,
+        total_clicks: totalClicks,
+        unique_views: uniqueViews,
+        unique_clicks: mapPgInt(overviewRow.unique_clicks),
+        ctr,
+        last_view_at: overviewRow.last_view_at || null,
+        last_click_at: overviewRow.last_click_at || null
+      },
+      daily: dailyResult.rows.map((row) => ({
+        day: row.day,
+        views: mapPgInt(row.views),
+        clicks: mapPgInt(row.clicks),
+        unique_views: mapPgInt(row.unique_views)
+      })),
+      browsers: browserStatsResult.rows.map((row) => ({
+        browser_name: row.browser_name,
+        browser_version: row.browser_version || null,
+        app_container: row.app_container || null,
+        is_in_app_browser: !!row.is_in_app_browser,
+        views: mapPgInt(row.views),
+        clicks: mapPgInt(row.clicks),
+        unique_views: mapPgInt(row.unique_views)
+      })),
+      devices: deviceStatsResult.rows.map((row) => ({
+        device_type: row.device_type || 'desktop',
+        device_brand: row.device_brand || null,
+        device_model: row.device_model || null,
+        os_name: row.os_name || null,
+        os_version: row.os_version || null,
+        views: mapPgInt(row.views),
+        clicks: mapPgInt(row.clicks),
+        unique_views: mapPgInt(row.unique_views)
+      })),
+      countries: countryStatsResult.rows.map((row) => ({
+        country: row.country || 'UZ',
+        views: mapPgInt(row.views),
+        clicks: mapPgInt(row.clicks),
+        unique_views: mapPgInt(row.unique_views)
+      })),
+      cities: cityStatsResult.rows.map((row) => ({
+        country: row.country || 'UZ',
+        region: row.region || '',
+        city: row.city || '',
+        views: mapPgInt(row.views),
+        clicks: mapPgInt(row.clicks),
+        unique_views: mapPgInt(row.unique_views)
+      }))
+    });
+  } catch (error) {
+    console.error('Get ad banner analytics error:', error);
+    res.status(500).json({ error: 'Ошибка получения аналитики рекламы' });
+  }
+});
+
+router.post('/ads/banners', async (req, res) => {
+  try {
+    await ensureActivityTypesSchema();
+    const payload = normalizeAdBannerPayload(req.body);
+    if (payload.error) {
+      return res.status(400).json({ error: payload.error });
+    }
+
+    if (payload.target_activity_type_ids.length > 0) {
+      const validIdsResult = await pool.query(
+        'SELECT id FROM business_activity_types WHERE id = ANY($1::int[])',
+        [payload.target_activity_type_ids]
+      );
+      const validIds = new Set(validIdsResult.rows.map((row) => Number(row.id)));
+      const missingIds = payload.target_activity_type_ids.filter((id) => !validIds.has(Number(id)));
+      if (missingIds.length > 0) {
+        return res.status(400).json({ error: `Не найдены виды деятельности: ${missingIds.join(', ')}` });
+      }
+    }
+
+    const activeCountResult = await pool.query(
+      `SELECT COUNT(*)::int AS count
+       FROM ad_banners
+       WHERE is_deleted = false`
+    );
+    if ((activeCountResult.rows[0]?.count || 0) >= 1000) {
+      return res.status(400).json({ error: 'Слишком много записей рекламы. Очистите историю.' });
+    }
+
+    const result = await pool.query(`
+      INSERT INTO ad_banners (
+        title, image_url, button_text, target_url, ad_type,
+        slot_order, display_seconds, transition_effect,
+        start_at, end_at, repeat_days, target_activity_type_ids, is_enabled,
+        created_by, updated_by
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13,$14,$15)
+      RETURNING *
+    `, [
+      payload.title,
+      payload.image_url,
+      payload.button_text,
+      payload.target_url,
+      payload.ad_type,
+      payload.slot_order,
+      payload.display_seconds,
+      payload.transition_effect,
+      payload.start_at,
+      payload.end_at,
+      JSON.stringify(payload.repeat_days),
+      JSON.stringify(payload.target_activity_type_ids),
+      payload.is_enabled,
+      req.user.id,
+      req.user.id
+    ]);
+
+    res.status(201).json(mapAdBannerRow(result.rows[0]));
+  } catch (error) {
+    console.error('Create ad banner error:', error);
+    if (error?.code === '23502' && error?.column === 'target_url') {
+      return res.status(400).json({
+        error: 'Ссылка баннера сейчас необязательна, но в базе ещё старая схема',
+        details: 'Нужен деплой/перезапуск с актуальной миграцией (колонка target_url должна быть nullable)'
+      });
+    }
+    if (error?.code === '23514') {
+      return res.status(400).json({
+        error: 'Проверьте параметры рекламы',
+        details: error.constraint || 'Нарушено ограничение данных баннера'
+      });
+    }
+    res.status(500).json({ error: 'Ошибка создания рекламного баннера' });
+  }
+});
+
+router.put('/ads/banners/:id', async (req, res) => {
+  try {
+    await ensureActivityTypesSchema();
+    const bannerId = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(bannerId)) {
+      return res.status(400).json({ error: 'Некорректный ID баннера' });
+    }
+
+    const exists = await pool.query('SELECT id FROM ad_banners WHERE id = $1 AND is_deleted = false', [bannerId]);
+    if (!exists.rows.length) {
+      return res.status(404).json({ error: 'Баннер не найден' });
+    }
+
+    const payload = normalizeAdBannerPayload(req.body);
+    if (payload.error) {
+      return res.status(400).json({ error: payload.error });
+    }
+
+    if (payload.target_activity_type_ids.length > 0) {
+      const validIdsResult = await pool.query(
+        'SELECT id FROM business_activity_types WHERE id = ANY($1::int[])',
+        [payload.target_activity_type_ids]
+      );
+      const validIds = new Set(validIdsResult.rows.map((row) => Number(row.id)));
+      const missingIds = payload.target_activity_type_ids.filter((id) => !validIds.has(Number(id)));
+      if (missingIds.length > 0) {
+        return res.status(400).json({ error: `Не найдены виды деятельности: ${missingIds.join(', ')}` });
+      }
+    }
+
+    const result = await pool.query(`
+      UPDATE ad_banners
+      SET title = $1,
+          image_url = $2,
+          button_text = $3,
+          target_url = $4,
+          ad_type = $5,
+          slot_order = $6,
+          display_seconds = $7,
+          transition_effect = $8,
+          start_at = $9,
+          end_at = $10,
+          repeat_days = $11::jsonb,
+          target_activity_type_ids = $12::jsonb,
+          is_enabled = $13,
+          updated_by = $14,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $15
+      RETURNING *
+    `, [
+      payload.title,
+      payload.image_url,
+      payload.button_text,
+      payload.target_url,
+      payload.ad_type,
+      payload.slot_order,
+      payload.display_seconds,
+      payload.transition_effect,
+      payload.start_at,
+      payload.end_at,
+      JSON.stringify(payload.repeat_days),
+      JSON.stringify(payload.target_activity_type_ids),
+      payload.is_enabled,
+      req.user.id,
+      bannerId
+    ]);
+
+    res.json(mapAdBannerRow(result.rows[0]));
+  } catch (error) {
+    console.error('Update ad banner error:', error);
+    if (error?.code === '23502' && error?.column === 'target_url') {
+      return res.status(400).json({
+        error: 'Ссылка баннера сейчас необязательна, но в базе ещё старая схема',
+        details: 'Нужен деплой/перезапуск с актуальной миграцией (колонка target_url должна быть nullable)'
+      });
+    }
+    if (error?.code === '23514') {
+      return res.status(400).json({
+        error: 'Проверьте параметры рекламы',
+        details: error.constraint || 'Нарушено ограничение данных баннера'
+      });
+    }
+    res.status(500).json({ error: 'Ошибка обновления рекламного баннера' });
+  }
+});
+
+router.patch('/ads/banners/:id/toggle', async (req, res) => {
+  try {
+    const bannerId = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(bannerId)) {
+      return res.status(400).json({ error: 'Некорректный ID баннера' });
+    }
+
+    const result = await pool.query(`
+      UPDATE ad_banners
+      SET is_enabled = NOT is_enabled,
+          updated_by = $2,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1 AND is_deleted = false
+      RETURNING *
+    `, [bannerId, req.user.id]);
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'Баннер не найден' });
+    }
+
+    res.json(mapAdBannerRow(result.rows[0]));
+  } catch (error) {
+    console.error('Toggle ad banner error:', error);
+    res.status(500).json({ error: 'Ошибка переключения рекламы' });
+  }
+});
+
+router.delete('/ads/banners/:id', async (req, res) => {
+  try {
+    const bannerId = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(bannerId)) {
+      return res.status(400).json({ error: 'Некорректный ID баннера' });
+    }
+
+    const result = await pool.query(`
+      UPDATE ad_banners
+      SET is_deleted = true,
+          is_enabled = false,
+          updated_by = $2,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1 AND is_deleted = false
+      RETURNING id
+    `, [bannerId, req.user.id]);
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'Баннер не найден' });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete ad banner error:', error);
+    res.status(500).json({ error: 'Ошибка удаления рекламы' });
+  }
+});
+
+const resolveAiProviderPayload = (payload = {}, existing = null) => {
+  const current = existing || {};
+  const name = normalizeAiProviderName(
+    payload.name === undefined ? current.name : payload.name
+  );
+  const providerType = normalizeAiProviderType(
+    payload.provider_type === undefined ? current.provider_type : payload.provider_type,
+    'gemini'
+  );
+  const imageModel = normalizeAiProviderModel(
+    payload.image_model === undefined ? current.image_model : payload.image_model
+  );
+  const textModel = normalizeAiProviderModel(
+    payload.text_model === undefined ? current.text_model : payload.text_model
+  );
+  const priority = toAiProviderPriority(
+    payload.priority === undefined ? current.priority : payload.priority,
+    100
+  );
+  const isEnabled = normalizeBooleanFlag(
+    payload.is_enabled === undefined ? current.is_enabled : payload.is_enabled,
+    true
+  );
+  const requestedIsActive = normalizeBooleanFlag(
+    payload.is_active === undefined ? current.is_active : payload.is_active,
+    false
+  );
+  const isActive = isEnabled ? requestedIsActive : false;
+  const configJson = normalizeAiProviderConfigJson(
+    payload.config_json === undefined ? current.config_json : payload.config_json
+  );
+
+  const rawApiKeyInput = payload.api_key === undefined || payload.api_key === null
+    ? null
+    : String(payload.api_key).trim();
+  const clearApiKey = normalizeBooleanFlag(payload.clear_api_key, false);
+  const currentEncrypted = String(current.api_key_encrypted || '').trim();
+  const currentMasked = String(current.api_key_masked || '').trim();
+  let nextEncrypted = currentEncrypted;
+  let nextMasked = currentMasked;
+
+  if (clearApiKey) {
+    nextEncrypted = '';
+    nextMasked = '';
+  } else if (rawApiKeyInput !== null && rawApiKeyInput !== '') {
+    nextEncrypted = encryptAiSecret(rawApiKeyInput);
+    nextMasked = buildAiApiKeyMask(rawApiKeyInput);
+  }
+
+  return {
+    name,
+    providerType,
+    imageModel,
+    textModel,
+    priority,
+    isEnabled,
+    isActive,
+    configJson,
+    apiKeyEncrypted: nextEncrypted,
+    apiKeyMasked: nextMasked
+  };
+};
+
+// =====================================================
+// AI ПРОВАЙДЕРЫ И МЕТРИКИ
+// =====================================================
+
+router.get('/ai/providers', async (req, res) => {
+  try {
+    await ensureAiProvidersSchema();
+    const result = await pool.query(`
+      SELECT
+        id, name, provider_type, api_key_encrypted, api_key_masked,
+        image_model, text_model, config_json, is_enabled, is_active,
+        priority, created_at, updated_at
+      FROM ai_providers
+      ORDER BY is_active DESC, priority ASC, id ASC
+    `);
+    res.json({
+      providers: result.rows.map((row) => normalizeAiProviderDbRow(row))
+    });
+  } catch (error) {
+    console.error('Get AI providers error:', error);
+    res.status(500).json({ error: 'Ошибка загрузки AI-провайдеров' });
+  }
+});
+
+router.post('/ai/providers', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await ensureAiProvidersSchema();
+    const payload = resolveAiProviderPayload(req.body || {}, {
+      provider_type: 'gemini',
+      priority: 100,
+      is_enabled: true,
+      is_active: false,
+      config_json: {}
+    });
+    if (!payload.name) {
+      return res.status(400).json({ error: 'Укажите название провайдера' });
+    }
+    if (payload.providerType !== 'pollinations' && !payload.apiKeyEncrypted) {
+      return res.status(400).json({ error: 'Укажите API ключ для выбранного провайдера' });
+    }
+
+    await client.query('BEGIN');
+    if (payload.isActive) {
+      await client.query(`UPDATE ai_providers SET is_active = false WHERE is_active = true`);
+    }
+    const insertResult = await client.query(`
+      INSERT INTO ai_providers (
+        name, provider_type, api_key_encrypted, api_key_masked,
+        image_model, text_model, config_json, is_enabled, is_active,
+        priority, created_by, updated_by
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$11)
+      RETURNING id, name, provider_type, api_key_encrypted, api_key_masked,
+                image_model, text_model, config_json, is_enabled, is_active,
+                priority, created_at, updated_at
+    `, [
+      payload.name,
+      payload.providerType,
+      payload.apiKeyEncrypted || null,
+      payload.apiKeyMasked || null,
+      payload.imageModel || null,
+      payload.textModel || null,
+      JSON.stringify(payload.configJson),
+      payload.isEnabled,
+      payload.isActive,
+      payload.priority,
+      req.user.id
+    ]);
+    await client.query('COMMIT');
+    res.status(201).json({
+      provider: normalizeAiProviderDbRow(insertResult.rows[0])
+    });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Create AI provider error:', error);
+    res.status(500).json({ error: 'Ошибка создания AI-провайдера' });
+  } finally {
+    client.release();
+  }
+});
+
+router.put('/ai/providers/:id', async (req, res) => {
+  const providerId = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(providerId) || providerId <= 0) {
+    return res.status(400).json({ error: 'Некорректный ID провайдера' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await ensureAiProvidersSchema();
+    const existingResult = await client.query(`
+      SELECT id, name, provider_type, api_key_encrypted, api_key_masked,
+             image_model, text_model, config_json, is_enabled, is_active,
+             priority, created_at, updated_at
+      FROM ai_providers
+      WHERE id = $1
+      LIMIT 1
+    `, [providerId]);
+    if (!existingResult.rows.length) {
+      return res.status(404).json({ error: 'AI-провайдер не найден' });
+    }
+
+    const payload = resolveAiProviderPayload(req.body || {}, existingResult.rows[0]);
+    if (!payload.name) {
+      return res.status(400).json({ error: 'Укажите название провайдера' });
+    }
+    if (payload.providerType !== 'pollinations' && !payload.apiKeyEncrypted) {
+      return res.status(400).json({ error: 'Укажите API ключ для выбранного провайдера' });
+    }
+
+    await client.query('BEGIN');
+    if (payload.isActive) {
+      await client.query(`UPDATE ai_providers SET is_active = false WHERE is_active = true AND id <> $1`, [providerId]);
+    }
+    const updateResult = await client.query(`
+      UPDATE ai_providers
+      SET name = $1,
+          provider_type = $2,
+          api_key_encrypted = $3,
+          api_key_masked = $4,
+          image_model = $5,
+          text_model = $6,
+          config_json = $7::jsonb,
+          is_enabled = $8,
+          is_active = $9,
+          priority = $10,
+          updated_by = $11,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $12
+      RETURNING id, name, provider_type, api_key_encrypted, api_key_masked,
+                image_model, text_model, config_json, is_enabled, is_active,
+                priority, created_at, updated_at
+    `, [
+      payload.name,
+      payload.providerType,
+      payload.apiKeyEncrypted || null,
+      payload.apiKeyMasked || null,
+      payload.imageModel || null,
+      payload.textModel || null,
+      JSON.stringify(payload.configJson),
+      payload.isEnabled,
+      payload.isActive,
+      payload.priority,
+      req.user.id,
+      providerId
+    ]);
+    await client.query('COMMIT');
+
+    res.json({
+      provider: normalizeAiProviderDbRow(updateResult.rows[0])
+    });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Update AI provider error:', error);
+    res.status(500).json({ error: 'Ошибка обновления AI-провайдера' });
+  } finally {
+    client.release();
+  }
+});
+
+router.patch('/ai/providers/:id/activate', async (req, res) => {
+  const providerId = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(providerId) || providerId <= 0) {
+    return res.status(400).json({ error: 'Некорректный ID провайдера' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await ensureAiProvidersSchema();
+    await client.query('BEGIN');
+    const checkResult = await client.query(`
+      SELECT id, is_enabled
+      FROM ai_providers
+      WHERE id = $1
+      LIMIT 1
+    `, [providerId]);
+    if (!checkResult.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'AI-провайдер не найден' });
+    }
+
+    await client.query(`UPDATE ai_providers SET is_active = false WHERE is_active = true AND id <> $1`, [providerId]);
+    const result = await client.query(`
+      UPDATE ai_providers
+      SET is_active = true,
+          is_enabled = true,
+          updated_by = $2,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      RETURNING id, name, provider_type, api_key_encrypted, api_key_masked,
+                image_model, text_model, config_json, is_enabled, is_active,
+                priority, created_at, updated_at
+    `, [providerId, req.user.id]);
+    await client.query('COMMIT');
+
+    res.json({
+      provider: normalizeAiProviderDbRow(result.rows[0])
+    });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Activate AI provider error:', error);
+    res.status(500).json({ error: 'Ошибка активации AI-провайдера' });
+  } finally {
+    client.release();
+  }
+});
+
+router.post('/ai/providers/:id/test', async (req, res) => {
+  const providerId = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(providerId) || providerId <= 0) {
+    return res.status(400).json({ error: 'Некорректный ID провайдера' });
+  }
+
+  let usageProviderRef = null;
+  let usageProviderType = normalizeAiProviderType(req.body?.provider_type, 'gemini');
+  let failedOperation = 'text_generate';
+  let failedModel = '';
+
+  try {
+    await ensureAiProvidersSchema();
+    const providerResult = await pool.query(`
+      SELECT
+        id, name, provider_type, api_key_encrypted, api_key_masked,
+        image_model, text_model, config_json, is_enabled, is_active,
+        priority, created_at, updated_at
+      FROM ai_providers
+      WHERE id = $1
+      LIMIT 1
+    `, [providerId]);
+    if (!providerResult.rows.length) {
+      return res.status(404).json({ error: 'AI-провайдер не найден' });
+    }
+
+    const row = providerResult.rows[0];
+    const provider = normalizeAiProviderDbRow(row);
+    const requestedProviderType = normalizeAiProviderType(
+      req.body?.provider_type,
+      normalizeAiProviderType(provider.provider_type, 'gemini')
+    );
+    usageProviderType = requestedProviderType;
+    const requestedImageModel = normalizeAiProviderModel(
+      req.body?.image_model === undefined ? provider.image_model : req.body?.image_model
+    );
+    const requestedTextModel = normalizeAiProviderModel(
+      req.body?.text_model === undefined ? provider.text_model : req.body?.text_model
+    );
+    const requestedName = normalizeAiProviderName(
+      req.body?.name === undefined ? provider.name : req.body?.name
+    ) || provider.name;
+    const requestedEnabled = normalizeBooleanFlag(
+      req.body?.is_enabled,
+      provider.is_enabled !== false
+    );
+    const requestedActive = normalizeBooleanFlag(
+      req.body?.is_active,
+      provider.is_active === true
+    );
+    const hasApiKeyField = Object.prototype.hasOwnProperty.call(req.body || {}, 'api_key');
+    const shouldClearApiKey = normalizeBooleanFlag(req.body?.clear_api_key, false);
+    const savedApiKey = decryptAiSecret(row.api_key_encrypted);
+    const requestedApiKeyRaw = hasApiKeyField ? String(req.body?.api_key || '').trim() : null;
+    const hasExplicitApiKeyValue = requestedApiKeyRaw !== null && requestedApiKeyRaw !== '';
+    const apiKey = shouldClearApiKey
+      ? ''
+      : (hasExplicitApiKeyValue ? requestedApiKeyRaw : savedApiKey);
+
+    if (requestedEnabled === false) {
+      return res.status(400).json({
+        error: 'Провайдер выключен. Включите его перед проверкой.'
+      });
+    }
+    if (requestedActive !== true) {
+      return res.status(400).json({
+        error: 'Провайдер не активирован. Активируйте и сохраните перед проверкой.'
+      });
+    }
+    if (!apiKey && requestedProviderType !== 'pollinations') {
+      return res.status(400).json({
+        error: 'У провайдера отсутствует API ключ. Проверьте токен.'
+      });
+    }
+
+    const providerRef = {
+      id: provider.id || null,
+      name: String(requestedName || provider.name || '').trim() || `Provider #${provider.id}`,
+      provider_type: requestedProviderType
+    };
+    usageProviderRef = providerRef;
+    const geminiRuntimeOverride = {
+      apiKey,
+      imageModelCandidates: [...new Set([
+        normalizeAiProviderModel(requestedImageModel),
+        ...GEMINI_IMAGE_MODEL_CANDIDATES
+      ].filter(Boolean))],
+      textModelCandidates: [...new Set([
+        normalizeAiProviderModel(requestedTextModel),
+        ...GEMINI_TEXT_MODEL_CANDIDATES
+      ].filter(Boolean))],
+      providerRef
+    };
+    const openAiRuntimeOverride = {
+      apiKey,
+      imageModelCandidates: [...new Set([
+        normalizeAiProviderModel(requestedImageModel),
+        ...OPENAI_IMAGE_MODEL_CANDIDATES
+      ].filter(Boolean))],
+      textModelCandidates: [...new Set([
+        normalizeAiProviderModel(requestedTextModel),
+        ...OPENAI_TEXT_MODEL_CANDIDATES
+      ].filter(Boolean))],
+      providerRef
+    };
+    const openRouterRuntimeOverride = {
+      apiKey,
+      imageModelCandidates: [...new Set([
+        normalizeAiProviderModel(requestedImageModel),
+        ...OPENROUTER_IMAGE_MODEL_CANDIDATES
+      ].filter(Boolean))],
+      textModelCandidates: [...new Set([
+        normalizeAiProviderModel(requestedTextModel),
+        ...OPENROUTER_TEXT_MODEL_CANDIDATES
+      ].filter(Boolean))],
+      providerRef
+    };
+    const pollinationsRuntimeOverride = {
+      apiKey: String(apiKey || '').trim(),
+      imageModelCandidates: buildModelCandidates([
+        normalizeAiProviderModel(requestedImageModel),
+        'flux',
+        'flux-2-dev',
+        'zimage',
+        ''
+      ]),
+      textModelCandidates: buildModelCandidates([
+        normalizeAiProviderModel(requestedTextModel),
+        'openai',
+        'gemini-fast',
+        'mistral',
+        ''
+      ]),
+      providerRef
+    };
+
+    const textPrompt = 'Напиши 1 короткое предложение: тест AI провайдера для каталога.';
+    const imagePrompt = 'Single product photo of a fresh red apple on white background, studio light, high quality';
+
+    let textResult = null;
+    let imageResult = null;
+
+    if (requestedProviderType === 'gemini') {
+      failedOperation = 'text_generate';
+      failedModel = requestedTextModel;
+      textResult = await generateGlobalProductTextWithGemini(textPrompt, {
+        expectJson: false,
+        runtimeOverride: geminiRuntimeOverride
+      });
+      failedOperation = 'image_generate';
+      failedModel = requestedImageModel;
+      imageResult = await generateGlobalProductImageWithGemini(imagePrompt, {
+        runtimeOverride: geminiRuntimeOverride
+      });
+    } else if (requestedProviderType === 'openai' && !isLikelyOpenRouterApiKey(apiKey)) {
+      failedOperation = 'text_generate';
+      failedModel = requestedTextModel;
+      textResult = await generateGlobalProductTextWithOpenAI(textPrompt, {
+        expectJson: false,
+        runtimeOverride: openAiRuntimeOverride
+      });
+      failedOperation = 'image_generate';
+      failedModel = requestedImageModel;
+      imageResult = await generateGlobalProductImageWithOpenAI(imagePrompt, {
+        runtimeOverride: openAiRuntimeOverride
+      });
+    } else if (requestedProviderType === 'openrouter' || isLikelyOpenRouterApiKey(apiKey)) {
+      failedOperation = 'text_generate';
+      failedModel = requestedTextModel;
+      textResult = await generateGlobalProductTextWithOpenRouter(textPrompt, {
+        expectJson: false,
+        runtimeOverride: openRouterRuntimeOverride
+      });
+      failedOperation = 'image_generate';
+      failedModel = requestedImageModel;
+      imageResult = await generateGlobalProductImageWithOpenRouter(imagePrompt, {
+        runtimeOverride: openRouterRuntimeOverride
+      });
+    } else if (requestedProviderType === 'pollinations') {
+      failedOperation = 'text_generate';
+      failedModel = requestedTextModel;
+      textResult = await generateGlobalProductTextWithPollinations(textPrompt, {
+        expectJson: false,
+        runtimeOverride: pollinationsRuntimeOverride
+      });
+      failedOperation = 'image_generate';
+      failedModel = requestedImageModel;
+      imageResult = await generateGlobalProductImageWithPollinations(imagePrompt, {
+        runtimeOverride: pollinationsRuntimeOverride
+      });
+    } else {
+      return res.status(400).json({
+        error: `Проверка для типа "${requestedProviderType}" пока не поддерживается`
+      });
+    }
+
+    const textModel = normalizeAiProviderModel(textResult?.model || requestedTextModel || '');
+    const imageModel = normalizeAiProviderModel(imageResult?.model || requestedImageModel || '');
+    if (!textResult?.text || !imageResult?.buffer) {
+      const failedResultOperation = !textResult?.text ? 'text_generate' : 'image_generate';
+      const failedResultModel = failedResultOperation === 'text_generate' ? textModel : imageModel;
+      await logAiUsageEvent({
+        providerRef,
+        operation: failedResultOperation,
+        model: failedResultModel,
+        status: 'failed',
+        httpStatus: 502,
+        errorCode: 'invalid_response',
+        errorMessage: 'Проверка не пройдена: токен/модель не дали корректный ответ',
+        meta: {
+          endpoint: 'ai/providers/test',
+          provider_id: provider.id
+        }
+      });
+      return res.status(502).json({
+        error: 'Проверка не пройдена: токен/модель не дали корректный ответ'
+      });
+    }
+
+    await logAiUsageEvent({
+      providerRef,
+      operation: 'text_generate',
+      model: textModel,
+      status: 'success',
+      estimatedCostUsd: resolveAiUsageCostUsd(textResult?.estimatedCostUsd),
+      meta: {
+        endpoint: 'ai/providers/test',
+        provider_id: provider.id
+      }
+    });
+    await logAiUsageEvent({
+      providerRef,
+      operation: 'image_generate',
+      model: imageModel,
+      status: 'success',
+      estimatedCostUsd: resolveAiUsageCostUsd(
+        imageResult?.estimatedCostUsd,
+        requestedProviderType === 'gemini' ? estimateGeminiImageCostUsd(imageModel) : null
+      ),
+      meta: {
+        endpoint: 'ai/providers/test',
+        provider_id: provider.id
+      }
+    });
+
+    const previewUrl = await saveGlobalProductAiImage(imageResult.buffer);
+    res.json({
+      success: true,
+      provider: {
+        id: provider.id,
+        name: providerRef.name,
+        provider_type: requestedProviderType
+      },
+      text_test: {
+        model: textModel || null,
+        preview: String(textResult.text || '').trim().slice(0, 180)
+      },
+      image_test: {
+        model: imageModel || null,
+        preview_url: previewUrl
+      }
+    });
+  } catch (error) {
+    console.error('AI provider test error:', error);
+    const formattedError = formatAiProviderTestError(error, usageProviderType);
+    await logAiUsageEvent({
+      providerRef: usageProviderRef,
+      operation: failedOperation,
+      model: normalizeAiProviderModel(failedModel),
+      status: 'failed',
+      httpStatus: Number(error?.response?.status || 0) || null,
+      errorCode: String(
+        error?.response?.data?.error?.status
+        || error?.response?.data?.error?.code
+        || error?.code
+        || ''
+      ).trim(),
+      errorMessage: String(formattedError || error?.message || '').trim(),
+      meta: {
+        endpoint: 'ai/providers/test',
+        provider_id: providerId
+      }
+    });
+    res.status(502).json({
+      error: `Проверка не пройдена: ${formattedError}`
+    });
+  }
+});
+
+router.delete('/ai/providers/:id', async (req, res) => {
+  const providerId = Number.parseInt(req.params.id, 10);
+  if (!Number.isInteger(providerId) || providerId <= 0) {
+    return res.status(400).json({ error: 'Некорректный ID провайдера' });
+  }
+
+  try {
+    await ensureAiProvidersSchema();
+    const result = await pool.query('DELETE FROM ai_providers WHERE id = $1 RETURNING id', [providerId]);
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'AI-провайдер не найден' });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete AI provider error:', error);
+    res.status(500).json({ error: 'Ошибка удаления AI-провайдера' });
+  }
+});
+
+router.get('/ai/usage/summary', async (req, res) => {
+  try {
+    await ensureAiUsageSchema();
+    const daysRaw = Number.parseInt(req.query.days, 10);
+    const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(365, daysRaw)) : 30;
+
+    const totalsResult = await pool.query(`
+      SELECT
+        COUNT(*)::int AS total_requests,
+        COUNT(*) FILTER (WHERE status = 'success')::int AS success_requests,
+        COUNT(*) FILTER (WHERE status = 'failed')::int AS failed_requests,
+        COUNT(*) FILTER (WHERE operation = 'text_generate')::int AS text_requests,
+        COUNT(*) FILTER (WHERE operation = 'text_generate' AND status = 'success')::int AS text_success_requests,
+        COUNT(*) FILTER (WHERE operation = 'text_generate' AND status = 'failed')::int AS text_failed_requests,
+        COUNT(*) FILTER (WHERE operation IN ('image_generate', 'image_process'))::int AS image_requests,
+        COUNT(*) FILTER (WHERE operation IN ('image_generate', 'image_process') AND status = 'success')::int AS image_success_requests,
+        COUNT(*) FILTER (WHERE operation IN ('image_generate', 'image_process') AND status = 'failed')::int AS image_failed_requests,
+        COUNT(*) FILTER (
+          WHERE (error_code = 'RESOURCE_EXHAUSTED')
+             OR (COALESCE(error_message, '') ILIKE '%quota%')
+             OR (COALESCE(error_message, '') ILIKE '%rate limit%')
+        )::int AS quota_related_errors,
+        COALESCE(SUM(estimated_cost_usd), 0)::numeric(14,6) AS estimated_cost_usd,
+        COALESCE(SUM(estimated_cost_usd) FILTER (WHERE operation = 'text_generate'), 0)::numeric(14,6) AS text_estimated_cost_usd,
+        COALESCE(SUM(estimated_cost_usd) FILTER (WHERE operation IN ('image_generate', 'image_process')), 0)::numeric(14,6) AS image_estimated_cost_usd
+      FROM ai_provider_usage
+      WHERE created_at >= NOW() - ($1::int * INTERVAL '1 day')
+    `, [days]);
+
+    const byProviderResult = await pool.query(`
+      SELECT
+        COALESCE(NULLIF(provider_name, ''), 'Unknown provider') AS provider_name,
+        COALESCE(NULLIF(provider_type, ''), 'unknown') AS provider_type,
+        COUNT(*)::int AS requests,
+        COUNT(*) FILTER (WHERE operation = 'text_generate')::int AS text_requests,
+        COUNT(*) FILTER (WHERE operation IN ('image_generate', 'image_process'))::int AS image_requests,
+        COUNT(*) FILTER (WHERE status = 'success')::int AS success_requests,
+        COUNT(*) FILTER (WHERE status = 'failed')::int AS failed_requests,
+        COALESCE(SUM(estimated_cost_usd), 0)::numeric(14,6) AS estimated_cost_usd,
+        COALESCE(SUM(estimated_cost_usd) FILTER (WHERE operation = 'text_generate'), 0)::numeric(14,6) AS text_estimated_cost_usd,
+        COALESCE(SUM(estimated_cost_usd) FILTER (WHERE operation IN ('image_generate', 'image_process')), 0)::numeric(14,6) AS image_estimated_cost_usd,
+        MAX(created_at) AS last_event_at
+      FROM ai_provider_usage
+      WHERE created_at >= NOW() - ($1::int * INTERVAL '1 day')
+      GROUP BY 1, 2
+      ORDER BY requests DESC, provider_name ASC
+      LIMIT 30
+    `, [days]);
+
+    const recentErrorsResult = await pool.query(`
+      SELECT
+        provider_name,
+        provider_type,
+        operation,
+        model,
+        http_status,
+        error_code,
+        error_message,
+        created_at
+      FROM ai_provider_usage
+      WHERE created_at >= NOW() - ($1::int * INTERVAL '1 day')
+        AND status = 'failed'
+      ORDER BY created_at DESC
+      LIMIT 30
+    `, [days]);
+
+    res.json({
+      days,
+      totals: totalsResult.rows[0] || {
+        total_requests: 0,
+        success_requests: 0,
+        failed_requests: 0,
+        text_requests: 0,
+        text_success_requests: 0,
+        text_failed_requests: 0,
+        image_requests: 0,
+        image_success_requests: 0,
+        image_failed_requests: 0,
+        quota_related_errors: 0,
+        estimated_cost_usd: 0,
+        text_estimated_cost_usd: 0,
+        image_estimated_cost_usd: 0
+      },
+      by_provider: byProviderResult.rows || [],
+      recent_errors: recentErrorsResult.rows || []
+    });
+  } catch (error) {
+    console.error('Get AI usage summary error:', error);
+    res.status(500).json({ error: 'Ошибка загрузки AI статистики' });
+  }
+});
+
+// =====================================================
+// БИЛЛИНГ (НАСТРОЙКИ)
+// =====================================================
+
+// Получить глобальные настройки биллинга
+router.get('/billing/settings', async (req, res) => {
+  try {
+    await ensureBillingSettingsSchema();
+    const result = await pool.query('SELECT * FROM billing_settings WHERE id = 1');
+    const payload = await enrichBillingSettingsWithCentralBotMeta(result.rows[0] || {});
+    res.json(payload);
+  } catch (error) {
+    console.error('Get billing settings error:', error);
+    res.status(500).json({ error: 'Ошибка получения настроек' });
+  }
+});
+
+// Обновить глобальные настройки биллинга
+router.put('/billing/settings', async (req, res) => {
+  try {
+    await ensureBillingSettingsSchema();
+    const {
+      card_number, card_holder, phone_number, telegram_username,
+      click_link, payme_link, default_starting_balance, default_order_cost,
+      superadmin_bot_token,
+      superadmin_telegram_id,
+      server_group_chat_id,
+      server_stats_interval_ms,
+      server_railway_projects,
+      catalog_animation_season,
+      ai_enabled,
+      ai_category_suggest_enabled,
+      print_form_background_url,
+      print_form_qr_position,
+      print_form_caption_ru,
+      print_form_caption_uz
+    } = req.body;
+
+    const normalizedTokenInput = normalizeTokenValue(superadmin_bot_token);
+    const normalizedSuperadminTelegramIdInput = normalizeTelegramIdValue(superadmin_telegram_id);
+    const normalizedServerGroupChatIdInput = normalizeTelegramIdValue(server_group_chat_id);
+    const normalizedServerStatsIntervalMs = normalizeStatsInterval(server_stats_interval_ms, null);
+    const normalizedServerRailwayProjects = String(server_railway_projects || '').trim();
+    const normalizedCatalogAnimationSeason = normalizeCatalogAnimationSeason(catalog_animation_season, 'off');
+    const normalizedAiEnabled = normalizeBooleanFlag(ai_enabled, true);
+    const normalizedAiCategorySuggestEnabled = normalizeBooleanFlag(ai_category_suggest_enabled, false);
+    const normalizedPrintFormSettings = normalizePrintFormSettingsPayload({
+      print_form_background_url,
+      print_form_qr_position,
+      print_form_caption_ru,
+      print_form_caption_uz
+    });
+    const previousSettings = await pool.query('SELECT * FROM billing_settings WHERE id = 1');
+    const previousSettingsRow = previousSettings.rows[0] || {};
+    const previousToken = normalizeTokenValue(previousSettingsRow.superadmin_bot_token);
+    const previousSuperadminTelegramId = normalizeTelegramIdValue(previousSettingsRow.superadmin_telegram_id);
+    const previousServerGroupChatId = normalizeTelegramIdValue(previousSettingsRow.server_group_chat_id);
+    const normalizedToken = normalizedTokenInput ?? previousToken;
+    const normalizedSuperadminTelegramId = normalizedSuperadminTelegramIdInput ?? previousSuperadminTelegramId;
+    const normalizedServerGroupChatId = normalizedServerGroupChatIdInput ?? previousServerGroupChatId;
+    const normalizedCardNumber = normalizePreservedText(card_number, previousSettingsRow.card_number, { digitsOnly: true });
+    const normalizedCardHolder = normalizePreservedText(card_holder, previousSettingsRow.card_holder);
+    const normalizedPhoneNumber = normalizePreservedText(phone_number, previousSettingsRow.phone_number);
+    const normalizedTelegramUsername = normalizePreservedText(telegram_username, previousSettingsRow.telegram_username);
+    const normalizedClickLink = normalizePreservedText(click_link, previousSettingsRow.click_link);
+    const normalizedPaymeLink = normalizePreservedText(payme_link, previousSettingsRow.payme_link);
+    const normalizedDefaultStartingBalance = normalizePreservedNumber(
+      default_starting_balance,
+      previousSettingsRow.default_starting_balance,
+      100000
+    );
+    const normalizedDefaultOrderCost = normalizePreservedNumber(
+      parseFlexibleAmount(default_order_cost, Number.NaN),
+      previousSettingsRow.default_order_cost,
+      1000
+    );
+
+    const result = await pool.query(`
+      UPDATE billing_settings
+      SET card_number = $1, card_holder = $2, phone_number = $3, 
+          telegram_username = $4, click_link = $5, payme_link = $6, 
+          default_starting_balance = $7, default_order_cost = $8,
+          superadmin_bot_token = $9,
+          superadmin_telegram_id = $10,
+          server_group_chat_id = $11,
+          server_stats_interval_ms = COALESCE($12, server_stats_interval_ms, 1800000),
+          server_railway_projects = $13,
+          catalog_animation_season = $14,
+          ai_enabled = $15,
+          print_form_background_url = $16,
+          print_form_qr_position = $17,
+          print_form_caption_ru = $18,
+          print_form_caption_uz = $19,
+          ai_category_suggest_enabled = $20,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1
+      RETURNING *
+    `, [
+      normalizedCardNumber,
+      normalizedCardHolder,
+      normalizedPhoneNumber,
+      normalizedTelegramUsername,
+      normalizedClickLink,
+      normalizedPaymeLink,
+      normalizedDefaultStartingBalance,
+      normalizedDefaultOrderCost,
+      normalizedToken, normalizedSuperadminTelegramId, normalizedServerGroupChatId, normalizedServerStatsIntervalMs, normalizedServerRailwayProjects, normalizedCatalogAnimationSeason, normalizedAiEnabled,
+      normalizedPrintFormSettings.print_form_background_url,
+      normalizedPrintFormSettings.print_form_qr_position,
+      normalizedPrintFormSettings.print_form_caption_ru,
+      normalizedPrintFormSettings.print_form_caption_uz,
+      normalizedAiCategorySuggestEnabled
+    ]);
+    await appendBillingSettingsHistory({
+      before: previousSettingsRow,
+      after: result.rows[0] || null,
+      userId: req.user?.id,
+      source: '/billing/settings'
+    });
+
+    try {
+      await reloadBot();
+    } catch (reloadErr) {
+      console.error('Bot reload warning after settings update:', reloadErr.message);
+    }
+    await refreshSuperadminServerMonitoringSchedule().catch((scheduleErr) => {
+      console.error('Server monitoring schedule refresh warning:', scheduleErr?.message || scheduleErr);
+    });
+
+    if (normalizedToken && normalizedToken !== previousToken) {
+      try {
+        const notificationTargetId = normalizeTelegramIdValue(result.rows[0]?.superadmin_telegram_id) || req.user.telegram_id;
+        await notifySuperadminTokenChanged(notificationTargetId);
+      } catch (notifyErr) {
+        console.error('Bot token change notification warning:', notifyErr.message);
+      }
+    }
+
+    const payload = await enrichBillingSettingsWithCentralBotMeta(result.rows[0]);
+    res.json(payload);
+  } catch (error) {
+    console.error('Update billing settings error:', error);
+    res.status(500).json({ error: 'Ошибка сохранения настроек' });
+  }
+});
+
+// Проверить центрального бота и отправить тестовое сообщение
+router.post('/billing/settings/test-bot', async (req, res) => {
+  try {
+    const {
+      superadmin_bot_token,
+      superadmin_telegram_id
+    } = req.body || {};
+
+    const token = normalizeTokenValue(superadmin_bot_token);
+    const telegramId = normalizeTelegramIdValue(superadmin_telegram_id);
+
+    if (!token) {
+      return res.status(400).json({ error: 'Введите токен центрального Telegram-бота' });
+    }
+
+    if (!telegramId) {
+      return res.status(400).json({ error: 'Введите Telegram ID владельца суперадминки' });
+    }
+
+    const bot = new TelegramBot(token);
+    const me = await bot.getMe();
+
+    await bot.sendMessage(
+      telegramId,
+      '✅ Тестовое сообщение\nБот работает'
+    );
+
+    res.json({
+      success: true,
+      message: 'Тестовое сообщение отправлено. Проверьте Telegram.',
+      superadmin_bot_name: me?.first_name || null,
+      superadmin_bot_username: me?.username ? `@${me.username}` : null
+    });
+  } catch (error) {
+    console.error('Test central bot error:', error);
+    res.status(400).json({
+      error: 'Не удалось проверить бота или отправить тестовое сообщение',
+      details: error.message
+    });
+  }
+});
+
+router.post('/billing/settings/send-server-report', async (req, res) => {
+  try {
+    const { targetChatId } = await sendServerReportUsingBillingSettings({
+      lang: req.body?.lang
+    });
+    res.json({
+      success: true,
+      target_chat_id: targetChatId,
+      message: 'Отчёт сервера отправлен'
+    });
+  } catch (error) {
+    if (error?.code === 'CENTRAL_BOT_TOKEN_REQUIRED') {
+      return res.status(400).json({ error: 'Сначала укажите токен центрального Telegram-бота' });
+    }
+    if (error?.code === 'SERVER_GROUP_CHAT_ID_REQUIRED') {
+      return res.status(400).json({ error: 'Сначала заполните server group chat id' });
+    }
+    console.error('Send server report error:', error);
+    return res.status(500).json({ error: 'Не удалось отправить отчёт сервера' });
+  }
+});
+
+// =====================================================
+// HELP INSTRUCTIONS (SUPERADMIN)
+// =====================================================
+
+router.get('/help-instructions', async (req, res) => {
+  try {
+    await ensureHelpInstructionsSchema();
+    const rows = await listHelpInstructions();
+    res.json(rows);
+  } catch (error) {
+    console.error('Get help instructions error:', error);
+    res.status(500).json({ error: 'Ошибка загрузки инструкций' });
+  }
+});
+
+router.post('/help-instructions/:id/view', async (req, res) => {
+  try {
+    await ensureHelpInstructionsSchema();
+    const instructionId = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(instructionId) || instructionId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID инструкции' });
+    }
+
+    const updated = await incrementHelpInstructionViewCount(instructionId);
+    if (!updated) {
+      return res.status(404).json({ error: 'Инструкция не найдена' });
+    }
+
+    res.json(updated);
+  } catch (error) {
+    console.error('Increment help instruction views error:', error);
+    res.status(500).json({ error: 'Ошибка обновления просмотров инструкции' });
+  }
+});
+
+router.post('/help-instructions', async (req, res) => {
+  try {
+    await ensureHelpInstructionsSchema();
+    const titleRu = normalizeInstructionText(req.body?.title_ru);
+    const titleUz = normalizeInstructionText(req.body?.title_uz);
+    const youtubeUrl = String(req.body?.youtube_url || '').trim();
+    const sortOrderRaw = req.body?.sort_order;
+    const parsedSortOrder = Number.parseInt(sortOrderRaw, 10);
+
+    if (!titleRu) {
+      return res.status(400).json({ error: 'Название кнопки RU обязательно' });
+    }
+    if (!titleUz) {
+      return res.status(400).json({ error: 'Название кнопки UZ обязательно' });
+    }
+    if (!youtubeUrl) {
+      return res.status(400).json({ error: 'Ссылка на YouTube обязательна' });
+    }
+    if (!isValidYouTubeUrl(youtubeUrl)) {
+      return res.status(400).json({ error: 'Укажите корректную ссылку YouTube' });
+    }
+    if (sortOrderRaw !== undefined && sortOrderRaw !== null && String(sortOrderRaw).trim() !== '' &&
+      (!Number.isFinite(parsedSortOrder) || parsedSortOrder <= 0)) {
+      return res.status(400).json({ error: 'Некорректный порядковый номер' });
+    }
+
+    const created = await createHelpInstruction({
+      title_ru: titleRu,
+      title_uz: titleUz,
+      youtube_url: youtubeUrl,
+      sort_order: (sortOrderRaw === undefined || sortOrderRaw === null || String(sortOrderRaw).trim() === '')
+        ? await resolveNextSortOrder()
+        : parsedSortOrder
+    });
+    res.status(201).json(created);
+  } catch (error) {
+    console.error('Create help instruction error:', error);
+    if (error?.code === 'DUPLICATE_SORT_ORDER') {
+      return res.status(409).json({ error: 'Этот порядковый номер уже используется. Выберите свободный номер.' });
+    }
+    res.status(500).json({ error: 'Ошибка добавления инструкции' });
+  }
+});
+
+router.put('/help-instructions/:id', async (req, res) => {
+  try {
+    await ensureHelpInstructionsSchema();
+    const instructionId = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(instructionId) || instructionId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID инструкции' });
+    }
+
+    const titleRu = normalizeInstructionText(req.body?.title_ru);
+    const titleUz = normalizeInstructionText(req.body?.title_uz);
+    const youtubeUrl = String(req.body?.youtube_url || '').trim();
+    const sortOrder = Number.parseInt(req.body?.sort_order, 10);
+
+    if (!titleRu) {
+      return res.status(400).json({ error: 'Название кнопки RU обязательно' });
+    }
+    if (!titleUz) {
+      return res.status(400).json({ error: 'Название кнопки UZ обязательно' });
+    }
+    if (!youtubeUrl) {
+      return res.status(400).json({ error: 'Ссылка на YouTube обязательна' });
+    }
+    if (!isValidYouTubeUrl(youtubeUrl)) {
+      return res.status(400).json({ error: 'Укажите корректную ссылку YouTube' });
+    }
+    if (!Number.isFinite(sortOrder) || sortOrder <= 0) {
+      return res.status(400).json({ error: 'Некорректный порядковый номер' });
+    }
+
+    const updated = await updateHelpInstruction(instructionId, {
+      title_ru: titleRu,
+      title_uz: titleUz,
+      youtube_url: youtubeUrl,
+      sort_order: sortOrder
+    });
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Инструкция не найдена' });
+    }
+
+    res.json(updated);
+  } catch (error) {
+    console.error('Update help instruction error:', error);
+    if (error?.code === 'DUPLICATE_SORT_ORDER') {
+      return res.status(409).json({ error: 'Этот порядковый номер уже используется. Выберите свободный номер.' });
+    }
+    res.status(500).json({ error: 'Ошибка обновления инструкции' });
+  }
+});
+
+router.delete('/help-instructions/:id', async (req, res) => {
+  try {
+    await ensureHelpInstructionsSchema();
+    const instructionId = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(instructionId) || instructionId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID инструкции' });
+    }
+
+    const deleted = await deleteHelpInstruction(instructionId);
+    if (!deleted) {
+      return res.status(404).json({ error: 'Инструкция не найдена' });
+    }
+
+    res.json({ success: true, deleted });
+  } catch (error) {
+    console.error('Delete help instruction error:', error);
+    if (error?.code === 'DEFAULT_DELETE_FORBIDDEN') {
+      return res.status(400).json({ error: 'Системные инструкции удалять нельзя' });
+    }
+    res.status(500).json({ error: 'Ошибка удаления инструкции' });
+  }
+});
+
+// ============================================================
+// Superadmin sessions — list active fellow-superadmin sessions and bulk-revoke them.
+// Scope is intentionally narrow: we only return rows for users with role='superadmin',
+// matching the agreed "Only fellow superadmins" answer in the design Q&A.
+// ============================================================
+async function getSuperadminUserIds() {
+  const result = await pool.query(`SELECT id FROM users WHERE role = 'superadmin'`);
+  return result.rows.map((row) => Number(row.id));
+}
+
+router.get('/sessions/active', async (req, res) => {
+  try {
+    const superadminIds = await getSuperadminUserIds();
+    const sessions = await listSessionsForUsers(superadminIds);
+    const currentJti = req.user?.session_jti || null;
+    const rows = sessions.map((row) => ({
+      id: row.id,
+      user_id: row.user_id,
+      username: row.username,
+      full_name: row.full_name,
+      ip_address: row.ip_address,
+      user_agent: row.user_agent,
+      device_label: row.device_label,
+      created_at: row.created_at,
+      last_seen_at: row.last_seen_at,
+      expires_at: row.expires_at,
+      is_current: row.jti === currentJti,
+      // Каждый суперадмин может выкинуть любую сессию суперадмина, кроме своей текущей —
+      // защита от случайного «отвалюсь сам».
+      is_revocable: row.jti !== currentJti
+    }));
+    res.json({
+      success: true,
+      count: rows.length,
+      sessions: rows
+    });
+  } catch (error) {
+    console.error('List superadmin sessions error:', error);
+    res.status(500).json({ error: 'Не удалось загрузить активные сессии' });
+  }
+});
+
+router.post('/sessions/revoke', async (req, res) => {
+  try {
+    const rawIds = Array.isArray(req.body?.session_ids) ? req.body.session_ids : [];
+    const ids = rawIds.map((v) => Number(v)).filter(Number.isFinite);
+    if (!ids.length) {
+      return res.status(400).json({ error: 'session_ids обязательно' });
+    }
+    const reason = req.body?.reason ? String(req.body.reason).slice(0, 120) : null;
+    const superadminIds = await getSuperadminUserIds();
+    // Prevent suicide: never let the caller revoke its own active session.
+    const currentJti = req.user?.session_jti || null;
+    let toRevoke = ids;
+    if (currentJti) {
+      const currentResult = await pool.query(
+        `SELECT id FROM superadmin_sessions WHERE jti = $1 LIMIT 1`,
+        [currentJti]
+      );
+      const currentSessionId = currentResult.rows[0]?.id || null;
+      if (currentSessionId) toRevoke = ids.filter((id) => id !== currentSessionId);
+    }
+    const revoked = await revokeSessions({
+      sessionIds: toRevoke,
+      revokedByUserId: req.user?.id || null,
+      reason,
+      allowedUserIds: superadminIds
+    });
+    await logActivity({
+      userId: req.user?.id || null,
+      restaurantId: null,
+      actionType: ACTION_TYPES.UPDATE || 'UPDATE',
+      entityType: 'SUPERADMIN_SESSION',
+      entityId: null,
+      entityName: `revoked ${revoked} session(s)`,
+      ipAddress: getIpFromRequest(req),
+      userAgent: getUserAgentFromRequest(req),
+      newValues: { revoked_ids: toRevoke, reason }
+    }).catch(() => {});
+    res.json({ success: true, revoked });
+  } catch (error) {
+    console.error('Revoke superadmin sessions error:', error);
+    res.status(500).json({ error: 'Не удалось завершить сессии' });
+  }
+});
+
+// Read-only login activity (logins + failed attempts) for fellow superadmins.
+// Surfaces existing activity_logs rows; no schema changes here.
+router.get('/sessions/login-attempts', async (req, res) => {
+  try {
+    const limit = Math.min(200, Math.max(1, Number.parseInt(req.query?.limit, 10) || 50));
+    const result = await pool.query(
+      `SELECT a.id,
+              a.user_id,
+              u.username,
+              u.full_name,
+              a.action_type,
+              a.ip_address,
+              a.user_agent,
+              a.created_at
+         FROM activity_logs a
+         INNER JOIN users u ON u.id = a.user_id
+         WHERE u.role = 'superadmin'
+           AND a.action_type IN ('LOGIN', 'LOGIN_FAILED', 'LOGOUT')
+         ORDER BY a.created_at DESC
+         LIMIT $1`,
+      [limit]
+    );
+    res.json({ success: true, attempts: result.rows });
+  } catch (error) {
+    console.error('List superadmin login attempts error:', error);
+    res.status(500).json({ error: 'Не удалось загрузить попытки входа' });
+  }
+});
+
+// =====================================================
+// Printer drivers catalog (Производитель → Модель → Версии драйверов)
+// Files live on the uploads volume; the current non-hidden version is what
+// store admins download. Old versions stay in history; outdated ones can be
+// hidden without deleting.
+// =====================================================
+const DRIVER_UPLOADS_BASE = process.env.UPLOADS_DIR
+  ? path.resolve(process.env.UPLOADS_DIR)
+  : path.join(__dirname, '..', '..', 'uploads');
+const DRIVER_FILES_DIR = path.join(DRIVER_UPLOADS_BASE, 'driver-files');
+
+let printerDriversSchemaReady = false;
+async function ensurePrinterDriversSchema() {
+  if (printerDriversSchemaReady) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS printer_drivers (
+      id SERIAL PRIMARY KEY,
+      manufacturer VARCHAR(120) NOT NULL,
+      model VARCHAR(160) NOT NULL,
+      photo_url TEXT,
+      sort_order INTEGER DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS printer_driver_versions (
+      id SERIAL PRIMARY KEY,
+      driver_id INTEGER NOT NULL REFERENCES printer_drivers(id) ON DELETE CASCADE,
+      version_label VARCHAR(80),
+      original_filename VARCHAR(255),
+      stored_filename VARCHAR(255) NOT NULL,
+      size BIGINT DEFAULT 0,
+      uploaded_by INTEGER,
+      uploaded_by_name VARCHAR(255),
+      is_current BOOLEAN DEFAULT false,
+      is_hidden BOOLEAN DEFAULT false,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_printer_driver_versions_driver ON printer_driver_versions(driver_id)`).catch(() => {});
+  printerDriversSchemaReady = true;
+}
+
+const printerDriverUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      try { fs.mkdirSync(DRIVER_FILES_DIR, { recursive: true }); cb(null, DRIVER_FILES_DIR); }
+      catch (e) { cb(e); }
+    },
+    filename: (req, file, cb) => {
+      const ext = String(path.extname(file.originalname || '')).slice(0, 12);
+      cb(null, `driver-${Date.now()}-${Math.round(Math.random() * 1e6)}${ext}`);
+    }
+  }),
+  limits: { fileSize: 300 * 1024 * 1024 }
+});
+
+const resolveDriverActorName = (user) => String(
+  user?.name || user?.full_name || user?.email || user?.username || (user?.id ? `#${user.id}` : 'superadmin')
+).slice(0, 255);
+
+async function fetchPrinterDriversWithVersions() {
+  const drivers = (await pool.query('SELECT * FROM printer_drivers ORDER BY manufacturer ASC, model ASC')).rows;
+  const versions = (await pool.query('SELECT * FROM printer_driver_versions ORDER BY created_at DESC, id DESC')).rows;
+  const byDriver = new Map();
+  for (const v of versions) {
+    if (!byDriver.has(v.driver_id)) byDriver.set(v.driver_id, []);
+    byDriver.get(v.driver_id).push(v);
+  }
+  return drivers.map((d) => ({ ...d, versions: byDriver.get(d.id) || [] }));
+}
+
+router.get('/printer-drivers', async (req, res) => {
+  try {
+    await ensurePrinterDriversSchema();
+    return res.json(await fetchPrinterDriversWithVersions());
+  } catch (error) {
+    console.error('List printer drivers error:', error?.message || error);
+    return res.status(500).json({ error: 'Ошибка загрузки каталога драйверов' });
+  }
+});
+
+router.post('/printer-drivers', async (req, res) => {
+  try {
+    await ensurePrinterDriversSchema();
+    const manufacturer = String(req.body?.manufacturer || '').trim().slice(0, 120);
+    const model = String(req.body?.model || '').trim().slice(0, 160);
+    const photoUrl = String(req.body?.photo_url || '').trim().slice(0, 1000) || null;
+    if (!manufacturer || !model) return res.status(400).json({ error: 'Укажите производителя и модель' });
+    const result = await pool.query(
+      `INSERT INTO printer_drivers (manufacturer, model, photo_url) VALUES ($1, $2, $3) RETURNING *`,
+      [manufacturer, model, photoUrl]
+    );
+    return res.json({ ...result.rows[0], versions: [] });
+  } catch (error) {
+    console.error('Create printer driver error:', error?.message || error);
+    return res.status(500).json({ error: 'Ошибка добавления принтера' });
+  }
+});
+
+router.put('/printer-drivers/:id', async (req, res) => {
+  try {
+    await ensurePrinterDriversSchema();
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Некорректный ID' });
+    const manufacturer = String(req.body?.manufacturer || '').trim().slice(0, 120);
+    const model = String(req.body?.model || '').trim().slice(0, 160);
+    const photoUrl = req.body?.photo_url === undefined ? undefined : (String(req.body?.photo_url || '').trim().slice(0, 1000) || null);
+    if (!manufacturer || !model) return res.status(400).json({ error: 'Укажите производителя и модель' });
+    const result = await pool.query(
+      `UPDATE printer_drivers
+          SET manufacturer = $1, model = $2,
+              photo_url = COALESCE($3, photo_url),
+              updated_at = CURRENT_TIMESTAMP
+        WHERE id = $4 RETURNING *`,
+      [manufacturer, model, photoUrl === undefined ? null : photoUrl, id]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: 'Принтер не найден' });
+    return res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Update printer driver error:', error?.message || error);
+    return res.status(500).json({ error: 'Ошибка сохранения принтера' });
+  }
+});
+
+router.delete('/printer-drivers/:id', async (req, res) => {
+  try {
+    await ensurePrinterDriversSchema();
+    const id = Number.parseInt(req.params.id, 10);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Некорректный ID' });
+    const versions = (await pool.query('SELECT stored_filename FROM printer_driver_versions WHERE driver_id = $1', [id])).rows;
+    await pool.query('DELETE FROM printer_drivers WHERE id = $1', [id]);
+    for (const v of versions) {
+      try { fs.unlinkSync(path.join(DRIVER_FILES_DIR, v.stored_filename)); } catch (_) {}
+    }
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Delete printer driver error:', error?.message || error);
+    return res.status(500).json({ error: 'Ошибка удаления принтера' });
+  }
+});
+
+router.post('/printer-drivers/:id/versions', (req, res) => {
+  printerDriverUpload.single('file')(req, res, async (uploadErr) => {
+    if (uploadErr) {
+      console.error('Driver version upload error:', uploadErr?.message || uploadErr);
+      return res.status(400).json({ error: `Ошибка загрузки файла: ${uploadErr.message}` });
+    }
+    try {
+      await ensurePrinterDriversSchema();
+      const id = Number.parseInt(req.params.id, 10);
+      if (!Number.isInteger(id) || id <= 0) {
+        if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
+        return res.status(400).json({ error: 'Некорректный ID принтера' });
+      }
+      const driver = (await pool.query('SELECT id FROM printer_drivers WHERE id = $1 LIMIT 1', [id])).rows[0];
+      if (!driver) {
+        if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
+        return res.status(404).json({ error: 'Принтер не найден' });
+      }
+      if (!req.file || !req.file.path) return res.status(400).json({ error: 'Файл не передан (поле "file")' });
+      const versionLabel = String(req.body?.version || '').trim().slice(0, 80) || null;
+      await pool.query('UPDATE printer_driver_versions SET is_current = false WHERE driver_id = $1 AND is_current = true', [id]);
+      await pool.query(
+        `INSERT INTO printer_driver_versions
+           (driver_id, version_label, original_filename, stored_filename, size, uploaded_by, uploaded_by_name, is_current)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true)`,
+        [
+          id, versionLabel,
+          String(req.file.originalname || '').slice(0, 255),
+          req.file.filename,
+          Number(req.file.size) || 0,
+          req.user?.id || null,
+          resolveDriverActorName(req.user)
+        ]
+      );
+      return res.json(await fetchPrinterDriversWithVersions());
+    } catch (error) {
+      if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
+      console.error('Save driver version error:', error?.message || error);
+      return res.status(500).json({ error: 'Ошибка загрузки версии драйвера' });
+    }
+  });
+});
+
+router.post('/printer-drivers/:id/versions/:vid/activate', async (req, res) => {
+  try {
+    await ensurePrinterDriversSchema();
+    const id = Number.parseInt(req.params.id, 10);
+    const vid = Number.parseInt(req.params.vid, 10);
+    if (!Number.isInteger(id) || !Number.isInteger(vid)) return res.status(400).json({ error: 'Некорректный ID' });
+    const row = (await pool.query('SELECT id FROM printer_driver_versions WHERE id = $1 AND driver_id = $2 LIMIT 1', [vid, id])).rows[0];
+    if (!row) return res.status(404).json({ error: 'Версия не найдена' });
+    await pool.query('UPDATE printer_driver_versions SET is_current = false WHERE driver_id = $1 AND is_current = true', [id]);
+    await pool.query('UPDATE printer_driver_versions SET is_current = true, is_hidden = false WHERE id = $1', [vid]);
+    return res.json(await fetchPrinterDriversWithVersions());
+  } catch (error) {
+    console.error('Activate driver version error:', error?.message || error);
+    return res.status(500).json({ error: 'Ошибка активации версии' });
+  }
+});
+
+router.patch('/printer-drivers/:id/versions/:vid', async (req, res) => {
+  try {
+    await ensurePrinterDriversSchema();
+    const id = Number.parseInt(req.params.id, 10);
+    const vid = Number.parseInt(req.params.vid, 10);
+    if (!Number.isInteger(id) || !Number.isInteger(vid)) return res.status(400).json({ error: 'Некорректный ID' });
+    const isHidden = normalizeBooleanFlag(req.body?.is_hidden, false);
+    // Don't hide the current version (it must stay downloadable).
+    const row = (await pool.query('SELECT is_current FROM printer_driver_versions WHERE id = $1 AND driver_id = $2 LIMIT 1', [vid, id])).rows[0];
+    if (!row) return res.status(404).json({ error: 'Версия не найдена' });
+    if (isHidden && row.is_current) return res.status(400).json({ error: 'Нельзя скрыть актуальную версию' });
+    await pool.query('UPDATE printer_driver_versions SET is_hidden = $1 WHERE id = $2', [isHidden, vid]);
+    return res.json(await fetchPrinterDriversWithVersions());
+  } catch (error) {
+    console.error('Update driver version error:', error?.message || error);
+    return res.status(500).json({ error: 'Ошибка обновления версии' });
+  }
+});
+
+module.exports = router;
+module.exports.generateGlobalProductLocalizedText = generateGlobalProductLocalizedText;
+module.exports.suggestProductCategoryWithAI = suggestProductCategoryWithAI;
+
+

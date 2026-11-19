@@ -1,0 +1,250 @@
+import React, { useEffect, useRef, useState } from 'react';
+import './ClientLocationPicker.css';
+import { ListSkeleton } from './SkeletonUI';
+
+const YANDEX_API_KEY = import.meta.env.VITE_YANDEX_MAPS_KEY || '';
+
+const resolveGeoAddress = (geoObject) => {
+  if (!geoObject) {
+    return { shortAddress: '', fullAddress: '' };
+  }
+  const thoroughfare = typeof geoObject.getThoroughfare === 'function' ? geoObject.getThoroughfare() : '';
+  const premise = typeof geoObject.getPremiseNumber === 'function' ? geoObject.getPremiseNumber() : '';
+  const shortAddress = [thoroughfare, premise].filter(Boolean).join(', ').trim();
+  const fullAddress = String(geoObject.getAddressLine?.() || '').trim() || shortAddress;
+  return {
+    shortAddress: shortAddress || fullAddress,
+    fullAddress: fullAddress || shortAddress
+  };
+};
+
+function ClientLocationPicker({ latitude, longitude, onLocationChange, onAddressChange = () => {} }) {
+  const mapContainerRef = useRef(null);
+  const mapRef = useRef(null);
+  const placemarkRef = useRef(null);
+  const onLocationChangeRef = useRef(onLocationChange);
+  const onAddressChangeRef = useRef(onAddressChange);
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [address, setAddress] = useState('');
+
+  useEffect(() => {
+    onLocationChangeRef.current = onLocationChange;
+  }, [onLocationChange]);
+
+  useEffect(() => {
+    onAddressChangeRef.current = onAddressChange;
+  }, [onAddressChange]);
+
+  // Загрузка Yandex Maps API
+  useEffect(() => {
+    let checkYmapsInterval = null;
+    let loadTimeout = null;
+
+    if (window.ymaps) {
+      setIsLoaded(true);
+      setLoadError('');
+      return;
+    }
+
+    const existingScript = document.querySelector('script[src*="api-maps.yandex.ru"]');
+    if (existingScript) {
+      checkYmapsInterval = setInterval(() => {
+        if (window.ymaps) {
+          setIsLoaded(true);
+          setLoadError('');
+          clearInterval(checkYmapsInterval);
+        }
+      }, 100);
+      loadTimeout = setTimeout(() => {
+        if (!window.ymaps) {
+          if (checkYmapsInterval) clearInterval(checkYmapsInterval);
+          setLoadError('Карта временно недоступна. Попробуйте позже или используйте определение местоположения.');
+        }
+      }, 15000);
+      return () => {
+        if (checkYmapsInterval) clearInterval(checkYmapsInterval);
+        if (loadTimeout) clearTimeout(loadTimeout);
+      };
+    }
+
+    const script = document.createElement('script');
+    script.src = `https://api-maps.yandex.ru/2.1/?apikey=${YANDEX_API_KEY}&lang=ru_RU`;
+    script.async = true;
+    script.onload = () => {
+      window.ymaps.ready(() => {
+        setIsLoaded(true);
+        setLoadError('');
+      });
+    };
+    script.onerror = () => {
+      setLoadError('Ошибка загрузки карты. Попробуйте позже или используйте определение местоположения.');
+    };
+    document.head.appendChild(script);
+
+    loadTimeout = setTimeout(() => {
+      if (!window.ymaps) {
+        setLoadError('Карта не ответила вовремя. Попробуйте позже или используйте определение местоположения.');
+      }
+    }, 15000);
+
+    return () => {
+      if (loadTimeout) clearTimeout(loadTimeout);
+    };
+  }, []);
+
+  // Инициализация карты
+  useEffect(() => {
+    if (!isLoaded || !mapContainerRef.current) return;
+
+    window.ymaps.ready(() => {
+      // Очищаем предыдущую карту
+      if (mapRef.current) {
+        mapRef.current.destroy();
+      }
+
+      const initialLat = latitude || 41.311081;
+      const initialLng = longitude || 69.240562;
+
+      // Создаем карту
+      const map = new window.ymaps.Map(mapContainerRef.current, {
+        center: [initialLat, initialLng],
+        zoom: 16,
+        controls: ['zoomControl', 'geolocationControl']
+      });
+
+      mapRef.current = map;
+
+      // Создаем перетаскиваемую метку
+      const placemark = new window.ymaps.Placemark(
+        [initialLat, initialLng],
+        {
+          hintContent: 'Перетащите метку',
+          balloonContent: 'Точка доставки'
+        },
+        {
+          preset: 'islands#redDeliveryIcon',
+          draggable: true
+        }
+      );
+
+      placemarkRef.current = placemark;
+      map.geoObjects.add(placemark);
+
+      // Получаем адрес по координатам
+      const getAddress = (coords) => {
+        window.ymaps.geocode(coords).then((res) => {
+          const firstGeoObject = res.geoObjects.get(0);
+          if (firstGeoObject) {
+            const resolved = resolveGeoAddress(firstGeoObject);
+            setAddress(resolved.fullAddress || resolved.shortAddress || '');
+            onAddressChangeRef.current(
+              resolved.fullAddress || resolved.shortAddress || '',
+              {
+                shortAddress: resolved.shortAddress || '',
+                fullAddress: resolved.fullAddress || resolved.shortAddress || ''
+              }
+            );
+          }
+        }).catch(() => {});
+      };
+
+      // Обработчик перетаскивания метки
+      placemark.events.add('dragend', () => {
+        const coords = placemark.geometry.getCoordinates();
+        onLocationChangeRef.current(coords[0], coords[1]);
+        getAddress(coords);
+      });
+
+      // Обработчик клика по карте
+      map.events.add('click', (e) => {
+        const coords = e.get('coords');
+        placemark.geometry.setCoordinates(coords);
+        map.setCenter(coords, map.getZoom(), { duration: 300 });
+        onLocationChangeRef.current(coords[0], coords[1]);
+        getAddress(coords);
+      });
+
+      // Начальный адрес
+      getAddress([initialLat, initialLng]);
+    });
+
+    return () => {
+      if (mapRef.current) {
+        mapRef.current.destroy();
+        mapRef.current = null;
+      }
+    };
+  }, [isLoaded]);
+
+  // Обновляем позицию маркера при изменении координат извне
+  useEffect(() => {
+    if (placemarkRef.current && latitude && longitude) {
+      const lat = Number(latitude);
+      const lng = Number(longitude);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+      const coords = [lat, lng];
+      const currentCoords = placemarkRef.current.geometry.getCoordinates?.() || [];
+      const isSamePoint = currentCoords.length === 2
+        && Math.abs(Number(currentCoords[0]) - lat) < 0.000001
+        && Math.abs(Number(currentCoords[1]) - lng) < 0.000001;
+      if (isSamePoint) return;
+
+      placemarkRef.current.geometry.setCoordinates(coords);
+      if (mapRef.current) {
+        mapRef.current.setCenter(coords, 16, { duration: 300 });
+      }
+      // Обновляем адрес
+      if (window.ymaps) {
+        window.ymaps.geocode(coords).then((res) => {
+          const firstGeoObject = res.geoObjects.get(0);
+          if (firstGeoObject) {
+            const resolved = resolveGeoAddress(firstGeoObject);
+            setAddress(resolved.fullAddress || resolved.shortAddress || '');
+            onAddressChangeRef.current(
+              resolved.fullAddress || resolved.shortAddress || '',
+              {
+                shortAddress: resolved.shortAddress || '',
+                fullAddress: resolved.fullAddress || resolved.shortAddress || ''
+              }
+            );
+          }
+        }).catch(() => {});
+      }
+    }
+  }, [latitude, longitude]);
+
+  if (!isLoaded) {
+    if (loadError) {
+      return (
+        <div className="client-location-picker-loading">
+          <div className="text-center text-muted p-3">
+            {loadError}
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className="client-location-picker-loading">
+        <ListSkeleton count={2} label="Загрузка карты" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="client-location-picker">
+      <div ref={mapContainerRef} className="client-map-container" />
+      {address && (
+        <div className="client-address-display">
+          <span className="address-icon">📍</span>
+          <span className="address-text">{address}</span>
+        </div>
+      )}
+      <div className="map-hint">
+        Нажмите на карту или перетащите маркер
+      </div>
+    </div>
+  );
+}
+
+export default ClientLocationPicker;

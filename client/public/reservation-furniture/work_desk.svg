@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160">
+  <!-- Table top -->
+  <rect x="40" y="30" width="80" height="80" rx="8" fill="#d5b27d" stroke="#a27840" stroke-width="4"/>
+  <!-- Laptop / Notebook -->
+  <rect x="60" y="68" width="40" height="18" rx="2" fill="#f8f1e4" stroke="#a27840" stroke-width="2"/>
+  <rect x="60" y="52" width="40" height="14" rx="2" fill="#334155" stroke="#a27840" stroke-width="2"/>
+  <!-- Chair (Top-down) -->
+  <rect x="65" y="120" width="30" height="22" rx="4" fill="#d5b27d" stroke="#a27840" stroke-width="3"/>
+  <rect x="63" y="136" width="34" height="6" rx="2" fill="#a27840"/>
+  <rect x="59" y="122" width="5" height="14" rx="1" fill="#d5b27d" stroke="#a27840" stroke-width="2.5"/>
+  <rect x="96" y="122" width="5" height="14" rx="1" fill="#d5b27d" stroke="#a27840" stroke-width="2.5"/>
+</svg>

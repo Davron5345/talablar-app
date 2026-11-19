@@ -1,0 +1,91 @@
+# 📦 Как добавить товары в систему
+
+## Вариант 1: Через админ-панель (рекомендуется)
+
+1. Войдите как админ: `Davron` / `993025345`
+2. Перейдите в админ-панель: https://tandoorapp-production.up.railway.app/admin
+3. Перейдите на вкладку "Товары"
+4. Нажмите "Добавить товар"
+5. Заполните форму и сохраните
+
+**Примечание:** Функционал добавления товаров через админ-панель нужно доработать. Пока используйте Вариант 2.
+
+## Вариант 2: Через SQL (быстро)
+
+### Шаг 1: Откройте базу данных в Railway
+
+1. В Railway откройте сервис **"Postgres"**
+2. Перейдите на вкладку **"Database"** → **"Data"**
+3. Нажмите на таблицу **"categories"** (если её нет, создайте через SQL)
+
+### Шаг 2: Добавьте категории
+
+Нажмите на таблицу "categories" → "Query" и выполните:
+
+```sql
+INSERT INTO categories (name_ru, name_uz, image_url, sort_order) VALUES
+('Овощи', 'Sabzavotlar', 'https://via.placeholder.com/150', 1),
+('Фрукты', 'Mevalar', 'https://via.placeholder.com/150', 2),
+('Мясо', 'Go''sht', 'https://via.placeholder.com/150', 3),
+('Молочные продукты', 'Sut mahsulotlari', 'https://via.placeholder.com/150', 4),
+('Хлебобулочные изделия', 'Non mahsulotlari', 'https://via.placeholder.com/150', 5)
+ON CONFLICT DO NOTHING;
+```
+
+### Шаг 3: Добавьте товары
+
+Нажмите на таблицу "products" → "Query" и выполните:
+
+```sql
+-- Сначала получите ID категорий
+SELECT id, name_ru FROM categories;
+
+-- Затем добавьте товары (замените category_id на реальные ID из запроса выше)
+INSERT INTO products (category_id, name_ru, name_uz, price, unit, in_stock, image_url) VALUES
+-- Овощи (предположим category_id = 1)
+(1, 'Помидоры', 'Pomidor', 15000, 'кг', true, 'https://via.placeholder.com/150'),
+(1, 'Огурцы', 'Bodring', 12000, 'кг', true, 'https://via.placeholder.com/150'),
+(1, 'Лук', 'Piyoz', 8000, 'кг', true, 'https://via.placeholder.com/150'),
+(1, 'Морковь', 'Sabzi', 10000, 'кг', true, 'https://via.placeholder.com/150'),
+(1, 'Картофель', 'Kartoshka', 7000, 'кг', true, 'https://via.placeholder.com/150'),
+
+-- Фрукты (предположим category_id = 2)
+(2, 'Яблоки', 'Olma', 20000, 'кг', true, 'https://via.placeholder.com/150'),
+(2, 'Бананы', 'Banan', 25000, 'кг', true, 'https://via.placeholder.com/150'),
+(2, 'Апельсины', 'Apelsin', 18000, 'кг', true, 'https://via.placeholder.com/150'),
+(2, 'Виноград', 'Uzum', 30000, 'кг', true, 'https://via.placeholder.com/150'),
+
+-- Мясо (предположим category_id = 3)
+(3, 'Говядина', 'Mol go''shti', 80000, 'кг', true, 'https://via.placeholder.com/150'),
+(3, 'Баранина', 'Qo''y go''shti', 90000, 'кг', true, 'https://via.placeholder.com/150'),
+(3, 'Курица', 'Tovuq', 35000, 'кг', true, 'https://via.placeholder.com/150'),
+
+-- Молочные продукты (предположим category_id = 4)
+(4, 'Молоко', 'Sut', 12000, 'л', true, 'https://via.placeholder.com/150'),
+(4, 'Сыр', 'Pishloq', 45000, 'кг', true, 'https://via.placeholder.com/150'),
+(4, 'Йогурт', 'Yogurt', 15000, 'шт', true, 'https://via.placeholder.com/150'),
+
+-- Хлебобулочные изделия (предположим category_id = 5)
+(5, 'Хлеб белый', 'Oq non', 5000, 'шт', true, 'https://via.placeholder.com/150'),
+(5, 'Хлеб черный', 'Qora non', 6000, 'шт', true, 'https://via.placeholder.com/150'),
+(5, 'Булочки', 'Bulochka', 3000, 'шт', true, 'https://via.placeholder.com/150');
+```
+
+## Вариант 3: Через API (программно)
+
+Можно добавить товары через API запросы, но для этого нужен токен админа.
+
+## Проверка
+
+После добавления товаров:
+1. Обновите страницу каталога
+2. Должны появиться категории и товары
+3. Можно добавлять товары в корзину
+
+---
+
+**Самый быстрый способ - Вариант 2 через SQL в Railway!**
+
+
+
+
